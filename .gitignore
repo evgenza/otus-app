@@ -1,0 +1,16 @@
+# Сборка
+/bin/
+*.exe
+*.out
+
+# Тесты / покрытие
+coverage.out
+*.test
+
+# Локальное окружение
+.env
+
+# IDE / ОС
+.idea/
+.vscode/
+.DS_Store
