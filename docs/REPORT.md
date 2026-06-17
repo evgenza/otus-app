@@ -4,7 +4,7 @@
 
 Написал небольшой HTTP-сервис на Go с тремя ручками: `/health`, `/version` и
 `/hello`. Раскладка стандартная для Go — точка входа в `cmd/app`, внутренняя
-логика во `internal/` (`handlers`, `version`). Версия и коммит зашиваются в
+логика во `internal/` (`handlers`, `version`). Версия и дата зашиваются в
 бинарь при сборке через `-ldflags`.
 
 ## Локальная сборка
@@ -29,13 +29,16 @@
 lint и test запускаются на каждый pull request, сборка образа и деплой — при
 пуше в `main`.
 
-![CI/CD pipeline](screenshots/02-ci-cd.png)
+Прогон: [CI/CD в GitHub Actions](https://github.com/evgenza/otus-app/actions/runs/27678333098).
+
+![Все этапы CI/CD пройдены](screenshots/02-ci-cd.png)
 
 ## Образ в Docker Hub
 
-Образ `evgenza/otus-app` публикуется с тегами `latest`, именем ветки
+Образ `evgenza/otus-app` публикуется с тегами `latest`, именем ветки и коротким
+SHA коммита: [evgenza/otus-app на Docker Hub](https://hub.docker.com/r/evgenza/otus-app).
 
-![Docker Hub](screenshots/03-dockerhub.png)
+![Образ с тегами в Docker Hub](screenshots/03-dockerhub.png)
 
 ## Запуск на сервере
 
@@ -54,4 +57,4 @@ $ curl http://82.202.142.225:8080/version
 
 ## Pull request
 
-https://github.com/evgenza/otus-app/pull/1
+[PR #2 — добавление и сборка приложения](https://github.com/evgenza/otus-app/pull/2)
