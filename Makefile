@@ -29,8 +29,19 @@ lint: ## линтеры
 	golangci-lint run ./...
 
 .PHONY: test
-test: ## Тесты с детектором гонок и покрытием
+test: ## Юнит-тесты с детектором гонок и покрытием
 	go test -race -cover ./...
+
+DATABASE_URL ?= postgres://otus:otus@localhost:5432/otus?sslmode=disable
+BASE_URL     ?= http://82.202.142.225:8080
+
+.PHONY: test-integration
+test-integration: ## Интеграционные тесты (нужен Postgres и DATABASE_URL)
+	DATABASE_URL="$(DATABASE_URL)" go test -tags=integration -race -v ./...
+
+.PHONY: loadtest
+loadtest: ## Нагрузочный тест k6 (BASE_URL задаёт цель)
+	docker run --rm -e BASE_URL="$(BASE_URL)" -v "$(PWD)/loadtest:/loadtest" grafana/k6 run /loadtest/script.js
 
 .PHONY: build
 build: ## Собрать бинарь

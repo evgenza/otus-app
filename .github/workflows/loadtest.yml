@@ -1,0 +1,22 @@
+name: Load test
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Базовый URL развёрнутого сервиса"
+        default: "http://82.202.142.225:8080"
+
+jobs:
+  k6:
+    name: k6 load test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run k6
+        run: |
+          docker run --rm -i \
+            -e BASE_URL="${{ inputs.base_url }}" \
+            -v "$PWD/loadtest:/loadtest" \
+            grafana/k6 run /loadtest/script.js
