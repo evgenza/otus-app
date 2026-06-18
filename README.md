@@ -1,17 +1,22 @@
 # otus-app
 
-Небольшой HTTP-сервис на Go. Сделан для домашки по CI/CD: собирается локально с
-линтером и тестами, в GitHub Actions проверяется, пакуется в Docker-образ,
-публикуется в Docker Hub и автоматически разворачивается на сервере через
-docker compose.
+HTTP-сервис на Go с хранением данных в PostgreSQL. Сделан для домашек по CI/CD и
+тестированию микросервисов: собирается локально с линтером и тестами, в GitHub
+Actions проверяется (юнит-тесты блокируют упаковку, интеграционные — отдельным
+ручным треком), пакуется в Docker-образ, публикуется в Docker Hub и
+автоматически разворачивается на сервере через docker compose. Для нагрузочного
+тестирования есть сценарий на k6.
 
 ## Что умеет
 
-Поднимает HTTP-сервер на порту 8080 с тремя ручками:
+HTTP-сервер на порту 8080:
 
-- `GET /health` — отвечает `{"status":"работает"}`, нужен для health-check.
+- `GET /health` — `{"status":"работает"}`, нужен для health-check.
 - `GET /version` — версия и дата сборки.
 - `GET /hello` — `{"message":"Привет, мир!"}`, можно передать `?name=...`.
+- `POST /messages` — принимает `{"text":"..."}`, сохраняет сообщение в БД,
+  возвращает созданную запись с `id` и `created_at`.
+- `GET /messages` — список последних сообщений из БД.
 
 Версия и дата зашиваются в бинарь при компиляции через `-ldflags`
 (пакет `internal/version`).
@@ -19,30 +24,38 @@ docker compose.
 ## Структура
 
 ```
-cmd/app/main.go            точка входа: HTTP-сервер и graceful shutdown
-internal/handlers/         роуты и их тесты
-internal/version/          версия сборки
-.github/workflows/         пайплайн CI/CD
-Dockerfile                 multi-stage сборка образа
-docker-compose.yml         запуск на сервере
-Makefile                   команды на каждый день
-docs/REPORT.md             отчёт по ДЗ со скриншотами
+cmd/app/main.go                       точка входа: HTTP-сервер и graceful shutdown
+internal/handlers/                    роуты, обработчики и юнит-тесты
+internal/storage/                     работа с PostgreSQL + интеграционные тесты
+internal/version/                     версия сборки
+loadtest/script.js                    нагрузочный сценарий k6
+.github/workflows/ci-cd.yml           основной пайплайн (lint, unit, build, deploy)
+.github/workflows/integration.yml     интеграционные тесты (ручной запуск)
+.github/workflows/loadtest.yml        нагрузочный тест k6 (ручной запуск)
+Dockerfile                            multi-stage сборка образа
+docker-compose.yml                    запуск app + postgres
+docs/REPORT.md                        отчёт по сборке/деплою
+docs/TEST-REPORT.md                   протокол тестирования
 ```
 
-Раскладка обычная для Go: то, что запускается, лежит в `cmd/`, остальное — во
-`internal/` (наружу из модуля не импортируется).
+Раскладка обычная для Go: то, что запускается, лежит в `cmd/`, внутренние
+пакеты — во `internal/`. Хранилище подключается к обработчикам через интерфейс
+`MessageStore`, поэтому юнит-тесты идут без реальной БД, а интеграционные — с ней.
+
+## Требования
+
+Go 1.26+, golangci-lint 2.x, Docker с плагином compose, make. Приложению нужна
+переменная `DATABASE_URL` (строка подключения к PostgreSQL).
 
 ## Локально
 
-Все команды — в Makefile,
-`make help` покажет список.
+Все команды — в Makefile, `make help` покажет список:
 
 ```bash
 make fmt      # форматирование
 make lint     # линтеры
-make test     # тесты
+make test     # юнит-тесты
 make build    # бинарь в bin/otus-app
-make run      # собрать и запустить
 ```
 
 Прогнать всё разом перед коммитом:
@@ -51,43 +64,72 @@ make run      # собрать и запустить
 make fmt lint test build
 ```
 
-Запустить и проверить:
+Проще всего поднять приложение вместе с базой через compose:
 
 ```bash
-./bin/otus-app &
+make docker-up          # app + postgres
 curl localhost:8080/health
-curl 'localhost:8080/hello?name=otus'
+curl -X POST localhost:8080/messages -d '{"text":"привет"}'
+curl localhost:8080/messages
+make docker-down
 ```
 
-## В Docker
+Запуск бинаря напрямую (нужен поднятый Postgres):
 
 ```bash
-make docker-build      # собрать образ evgenza/otus-app
-make docker-up         # поднять через compose
-make docker-down       # остановить
+export DATABASE_URL='postgres://otus:otus@localhost:5432/otus?sslmode=disable'
+./bin/otus-app
 ```
 
-Образ собирается в два этапа: на golang:alpine компилируется статический бинарь,
-в финальный alpine-образ кладётся только он. Контейнер запускается под обычным
-пользователем и имеет HEALTHCHECK.
+## Тестирование
+
+**Юнит-тесты** (без БД, через фейковое хранилище):
+
+```bash
+go test -race -cover ./...
+```
+
+**Интеграционные тесты** (API + реальный PostgreSQL, под build-тегом
+`integration`). Нужен запущенный Postgres и `DATABASE_URL`:
+
+```bash
+docker run -d --name pg -e POSTGRES_USER=otus -e POSTGRES_PASSWORD=otus \
+  -e POSTGRES_DB=otus -p 5432:5432 postgres:16-alpine
+DATABASE_URL='postgres://otus:otus@localhost:5432/otus?sslmode=disable' \
+  go test -tags=integration -race ./...
+```
+
+**Нагрузочное тестирование** (k6) против развёрнутого сервиса:
+
+```bash
+docker run --rm -e BASE_URL=http://82.202.142.225:8080 \
+  -v "$PWD/loadtest:/loadtest" grafana/k6 run /loadtest/script.js
+```
+
+Протокол испытаний и анализ — в [docs/TEST-REPORT.md](docs/TEST-REPORT.md).
 
 ## CI/CD
 
-Пайплайн в `.github/workflows/ci-cd.yml`, четыре этапа:
+Основной пайплайн `ci-cd.yml`:
 
-1. **lint** — проверка gofmt и golangci-lint.
-2. **test** — `go test -race -cover` и контрольная сборка.
-3. **build-and-push** — собирает Docker-образ и пушит в Docker Hub.
-4. **deploy** — заходит на сервер по SSH, делает `docker compose pull` и
-   `up -d`.
+1. **lint** — gofmt и golangci-lint.
+2. **unit tests** — `go test -race -cover` (блокирующий этап перед упаковкой).
+3. **build-and-push** — собирает Docker-образ и пушит в Docker Hub
+   (только после успешных lint и unit-тестов).
+4. **deploy** — заходит на сервер по SSH, `docker compose pull` и `up -d`.
 
-lint и test гоняются и на pull request. Сборка образа и деплой — только при
-пуше в `main`.
+Отдельными ручными треками (`workflow_dispatch`):
+
+- `integration.yml` — интеграционные тесты с сервисом Postgres;
+- `loadtest.yml` — нагрузочный тест k6 по указанному URL.
+
+Секреты репозитория: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `SSH_HOST`,
+`SSH_USER`, `SSH_PORT`, `SSH_KEY`.
 
 ## Деплой на сервер
 
-На сервере нужны Docker и плагин compose. Пайплайн сам логинится в Docker Hub,
-тянет свежий образ и перезапускает контейнер. Руками то же самое:
+На сервере нужны Docker и плагин compose. Пайплайн логинится в Docker Hub, тянет
+свежий образ и перезапускает стек (app + postgres). Руками то же самое:
 
 ```bash
 cd ~/otus-app
