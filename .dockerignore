@@ -1,0 +1,9 @@
+.git
+.github
+.gitignore
+bin/
+docs/
+*.md
+Makefile
+docker-compose.yml
+.golangci.yml
