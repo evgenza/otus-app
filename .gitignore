@@ -10,6 +10,9 @@ coverage.out
 # Локальное окружение
 .env
 
+# Локальный конфиг Alertmanager с реальными кредами SMTP
+observability/alertmanager/alertmanager.yml
+
 # IDE / ОС
 .idea/
 .vscode/

@@ -24,23 +24,23 @@ HTTP-сервер на порту 8080:
 ## Структура
 
 ```
-cmd/app/main.go                       точка входа: HTTP-сервер и graceful shutdown
+cmd/app/main.go                       точка входа app: HTTP-сервер + graceful shutdown
+cmd/gateway/main.go                   второй сервис: проксирует запросы в app
 internal/handlers/                    роуты, обработчики и юнит-тесты
 internal/storage/                     работа с PostgreSQL + интеграционные тесты
+internal/observability/               логи (slog), метрики (Prometheus), трейсинг (OTel)
 internal/version/                     версия сборки
 loadtest/script.js                    нагрузочный сценарий k6
+observability/                        стек наблюдаемости (Prometheus, Grafana, ELK, Jaeger)
 .github/workflows/ci-cd.yml           основной пайплайн (lint, unit, build, deploy)
 .github/workflows/integration.yml     интеграционные тесты (ручной запуск)
 .github/workflows/loadtest.yml        нагрузочный тест k6 (ручной запуск)
-Dockerfile                            multi-stage сборка образа
+Dockerfile                            multi-stage сборка образов app и gateway
 docker-compose.yml                    запуск app + postgres
 docs/REPORT.md                        отчёт по сборке/деплою
 docs/TEST-REPORT.md                   протокол тестирования
+docs/OBSERVABILITY.md                 протокол проверки наблюдаемости
 ```
-
-Раскладка обычная для Go: то, что запускается, лежит в `cmd/`, внутренние
-пакеты — во `internal/`. Хранилище подключается к обработчикам через интерфейс
-`MessageStore`, поэтому юнит-тесты идут без реальной БД, а интеграционные — с ней.
 
 ## Требования
 
@@ -108,6 +108,33 @@ docker run --rm -e BASE_URL=http://82.202.142.225:8080 \
 
 Протокол испытаний и анализ — в [docs/TEST-REPORT.md](docs/TEST-REPORT.md).
 
+## Наблюдаемость
+
+Оба сервиса инструментированы: структурные JSON-логи (`slog`), метрики
+Prometheus (`/metrics`, включая бизнес-метрику `otus_messages_created_total`) и
+трейсинг OpenTelemetry (запросы к БД — через `otelpgx`). Трейсинг включается
+переменной `OTEL_EXPORTER_OTLP_ENDPOINT` (без неё — выключен, приложение
+работает как обычно).
+
+Локальный стек наблюдаемости поднимается отдельно:
+
+```bash
+cd observability
+cp .env.example .env          # заполнить SMTP для писем-алертов
+docker compose up -d
+```
+
+После старта доступно: Grafana `:3000`, Prometheus `:9090`, Alertmanager
+`:9093`, Jaeger `:16686`, Kibana `:5601`.
+
+- **Логи** → Filebeat → Elasticsearch → Kibana (data view `otus-logs*`);
+- **Метрики** → Prometheus → дашборд Grafana;
+- **Алерты** (`ServiceDown`, `HighErrorRate`, `HighLatency`) → Alertmanager →
+  почта;
+- **Трейсы** цепочки gateway→app→БД → Jaeger.
+
+Протокол проверки — в [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
+
 ## CI/CD
 
 Основной пайплайн `ci-cd.yml`:
@@ -127,15 +154,13 @@ docker run --rm -e BASE_URL=http://82.202.142.225:8080 \
   (`workflow_dispatch`).
 
 Секреты репозитория: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `SSH_HOST`,
-`SSH_USER`, `SSH_PORT`, `SSH_KEY`.
+`SSH_USER`, `SSH_PORT`, `SSH_KEY`, а также `SMTP_USERNAME`, `SMTP_PASSWORD`,
+`SMTP_TO` для писем-алертов на сервере.
 
 ## Деплой на сервер
 
-На сервере нужны Docker и плагин compose. Пайплайн логинится в Docker Hub, тянет
-свежий образ и перезапускает стек (app + postgres). Руками то же самое:
-
-```bash
-cd ~/otus-app
-docker compose pull
-docker compose up -d
-```
+На сервере нужны Docker и плагин compose. Пайплайн копирует каталог
+`observability/`, рендерит `alertmanager.yml` из секретов, логинится в Docker Hub
+и поднимает стек наблюдаемости (`docker-compose.server.yml`: app, gateway, БД,
+Prometheus, Grafana, Alertmanager, Jaeger). После деплоя на сервере доступны
+Grafana `:3000`, Prometheus `:9090`, Jaeger `:16686`.

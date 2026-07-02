@@ -3,7 +3,7 @@ FROM golang:1.26-alpine AS builder
 WORKDIR /src
 
 # Сначала тянем зависимости
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
@@ -15,7 +15,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w \
       -X github.com/evgenza/otus-app/internal/version.Version=${VERSION} \
       -X github.com/evgenza/otus-app/internal/version.Date=${DATE}" \
-    -o /out/app ./cmd/app
+    -o /out/app ./cmd/app \
+    && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/gateway ./cmd/gateway
 
 FROM alpine:3.20
 
@@ -24,6 +25,7 @@ RUN apk add --no-cache curl ca-certificates \
 
 WORKDIR /app
 COPY --from=builder /out/app /app/app
+COPY --from=builder /out/gateway /app/gateway
 
 USER app
 EXPOSE 8080

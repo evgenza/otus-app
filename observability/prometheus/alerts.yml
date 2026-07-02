@@ -1,0 +1,29 @@
+groups:
+  - name: otus
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"app|gateway"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Сервис {{ $labels.job }} недоступен"
+          description: "Prometheus не может собрать метрики с {{ $labels.instance }} более 30 секунд."
+
+      - alert: HighErrorRate
+        expr: sum(rate(otus_http_requests_total{status=~"5.."}[1m])) / sum(rate(otus_http_requests_total[1m])) > 0.05
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокая доля ошибок 5xx"
+          description: "Более 5% ответов завершаются ошибкой последнюю минуту."
+
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, sum(rate(otus_http_request_duration_seconds_bucket[1m])) by (le)) > 0.5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокая задержка ответа (p95 > 0.5с)"
+          description: "95-й перцентиль времени ответа выше 0.5 секунды."
