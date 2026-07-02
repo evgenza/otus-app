@@ -1,0 +1,29 @@
+filebeat.inputs:
+  - type: container
+    paths:
+      - /var/lib/docker/containers/*/*.log
+
+processors:
+  - add_docker_metadata: ~
+  # Собираем логи только наших микросервисов (app и gateway)
+  - drop_event:
+      when:
+        not:
+          contains:
+            container.image.name: "evgenza/otus-app"
+  - decode_json_fields:
+      fields: ["message"]
+      target: "app"
+      overwrite_keys: true
+      add_error_key: true
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  index: "otus-logs-%{+yyyy.MM.dd}"
+
+setup.template.name: "otus-logs"
+setup.template.pattern: "otus-logs-*"
+setup.ilm.enabled: false
+
+setup.kibana:
+  host: "http://kibana:5601"

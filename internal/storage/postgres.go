@@ -3,8 +3,10 @@ package storage
 import (
 	"context"
 
-	"github.com/evgenza/otus-app/internal/handlers"
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/evgenza/otus-app/internal/handlers"
 )
 
 type Postgres struct {
@@ -12,7 +14,13 @@ type Postgres struct {
 }
 
 func New(ctx context.Context, dsn string) (*Postgres, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ConnConfig.Tracer = otelpgx.NewTracer()
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}

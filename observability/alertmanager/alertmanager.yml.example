@@ -1,0 +1,20 @@
+global:
+  smtp_smarthost: "smtp.yandex.ru:587"
+  smtp_from: "you@yandex.ru"
+  smtp_auth_username: "you@yandex.ru"
+  smtp_auth_password: "APP_PASSWORD"
+  smtp_require_tls: true
+
+route:
+  receiver: email
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 1h
+
+receivers:
+  - name: email
+    email_configs:
+      - to: "you@yandex.ru"
+        send_resolved: true
+        headers:
+          subject: "[otus-app] {{ .Status | toUpper }}: {{ .CommonAnnotations.summary }}"

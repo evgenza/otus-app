@@ -3,11 +3,14 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/evgenza/otus-app/internal/observability"
 	"github.com/evgenza/otus-app/internal/version"
 )
 
@@ -34,22 +37,16 @@ func New(store MessageStore) http.Handler {
 	mux.HandleFunc("GET /hello", hello)
 	mux.HandleFunc("POST /messages", a.createMessage)
 	mux.HandleFunc("GET /messages", a.listMessages)
+	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("GET /", hello)
-	return logging(mux)
-}
-
-func logging(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("%s %s", r.Method, r.URL.Path)
-		next.ServeHTTP(w, r)
-	})
+	return observability.WrapHTTP("otus-app", mux)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
-		log.Printf("не удалось закодировать ответ: %v", err)
+		slog.Error("не удалось закодировать ответ", "err", err)
 	}
 }
 
@@ -86,17 +83,18 @@ func (a *API) createMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	msg, err := a.store.Create(r.Context(), req.Text)
 	if err != nil {
-		log.Printf("не удалось сохранить сообщение: %v", err)
+		slog.ErrorContext(r.Context(), "не удалось сохранить сообщение", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "не удалось сохранить сообщение"})
 		return
 	}
+	observability.MessagesCreated.Inc()
 	writeJSON(w, http.StatusCreated, msg)
 }
 
 func (a *API) listMessages(w http.ResponseWriter, r *http.Request) {
 	msgs, err := a.store.List(r.Context())
 	if err != nil {
-		log.Printf("не удалось получить сообщения: %v", err)
+		slog.ErrorContext(r.Context(), "не удалось получить сообщения", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "не удалось получить сообщения"})
 		return
 	}
