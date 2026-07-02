@@ -48,8 +48,9 @@ $ DATABASE_URL='postgres://otus:otus@localhost:5432/otus?sslmode=disable' \
 PASS
 ```
 
-В CI — отдельный **ручной** трек `integration.yml` (`workflow_dispatch`) с
-сервисным контейнером Postgres. Запускается отдельно от основного пайплайна.
+В CI — отдельный трек `integration.yml` с сервисным контейнером Postgres.
+Запускается на pull request в `main` (чтобы регрессии по БД ловились до merge) и
+вручную через `workflow_dispatch`.
 
 ![Интеграционные тесты в CI](screenshots/05-integration.png)
 

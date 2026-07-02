@@ -118,10 +118,13 @@ docker run --rm -e BASE_URL=http://82.202.142.225:8080 \
    (только после успешных lint и unit-тестов).
 4. **deploy** — заходит на сервер по SSH, `docker compose pull` и `up -d`.
 
-Отдельными ручными треками (`workflow_dispatch`):
+Отдельные треки:
 
-- `integration.yml` — интеграционные тесты с сервисом Postgres;
-- `loadtest.yml` — нагрузочный тест k6 по указанному URL.
+- `integration.yml` — интеграционные тесты с сервисом Postgres. Запускаются на
+  pull request в `main` (ловят регрессии по БД до merge) и вручную
+  (`workflow_dispatch`).
+- `loadtest.yml` — нагрузочный тест k6 по указанному URL, вручную
+  (`workflow_dispatch`).
 
 Секреты репозитория: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `SSH_HOST`,
 `SSH_USER`, `SSH_PORT`, `SSH_KEY`.
