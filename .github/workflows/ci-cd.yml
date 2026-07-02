@@ -117,17 +117,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Copy docker-compose.yml to server
+      - name: Copy observability stack to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           port: ${{ secrets.SSH_PORT }}
-          source: "docker-compose.yml"
-          target: "~/otus-app"
+          source: "observability"
+          target: "~"
 
-      - name: Pull image and restart stack
+      - name: Render Alertmanager config and restart stack
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -136,10 +136,33 @@ jobs:
           port: ${{ secrets.SSH_PORT }}
           script: |
             set -e
-            cd ~/otus-app
+            cd ~/observability
+            cat > alertmanager/alertmanager.yml <<EOF
+            global:
+              smtp_smarthost: "smtp.yandex.ru:587"
+              smtp_from: "${{ secrets.SMTP_USERNAME }}"
+              smtp_auth_username: "${{ secrets.SMTP_USERNAME }}"
+              smtp_auth_password: "${{ secrets.SMTP_PASSWORD }}"
+              smtp_require_tls: true
+            route:
+              receiver: email
+              group_wait: 10s
+              group_interval: 1m
+              repeat_interval: 1h
+            receivers:
+              - name: email
+                email_configs:
+                  - to: "${{ secrets.SMTP_TO }}"
+                    send_resolved: true
+                    headers:
+                      subject: "[otus-app] {{ .Status | toUpper }}: {{ .CommonAnnotations.summary }}"
+            EOF
+
+            # Гасим прежний app+db стек, если остался от старого деплоя
+            if [ -d ~/otus-app ]; then (cd ~/otus-app && docker compose down) || true; fi
+
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
             export TAG=latest
-            docker compose pull
-            docker compose up -d
-            docker image prune -f
-            docker compose ps
+            docker compose -f docker-compose.server.yml pull
+            docker compose -f docker-compose.server.yml up -d
+            docker compose -f docker-compose.server.yml ps
