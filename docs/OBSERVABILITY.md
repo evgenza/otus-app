@@ -15,7 +15,7 @@ postgres-exporter.
 
 ```bash
 cd observability
-cp .env.example .env                      # заполнить SMTP при необходимости
+cp alertmanager/alertmanager.yml.tmpl alertmanager/alertmanager.yml   # вписать SMTP при необходимости
 docker compose up -d
 ```
 

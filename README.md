@@ -27,6 +27,7 @@ HTTP-сервер на порту 8080:
 cmd/app/main.go                       точка входа app: HTTP-сервер + graceful shutdown
 cmd/gateway/main.go                   второй сервис: проксирует запросы в app
 internal/handlers/                    роуты, обработчики и юнит-тесты
+internal/httpserver/                  запуск HTTP-сервера с graceful shutdown
 internal/storage/                     работа с PostgreSQL + интеграционные тесты
 internal/observability/               логи (slog), метрики (Prometheus), трейсинг (OTel)
 internal/version/                     версия сборки
@@ -120,7 +121,7 @@ Prometheus (`/metrics`, включая бизнес-метрику `otus_message
 
 ```bash
 cd observability
-cp .env.example .env          # заполнить SMTP для писем-алертов
+cp alertmanager/alertmanager.yml.tmpl alertmanager/alertmanager.yml   # вписать SMTP-креды
 docker compose up -d
 ```
 
@@ -159,8 +160,9 @@ docker compose up -d
 
 ## Деплой на сервер
 
-На сервере нужны Docker и плагин compose. Пайплайн копирует каталог
-`observability/`, рендерит `alertmanager.yml` из секретов, логинится в Docker Hub
+На сервере нужны Docker и плагин compose. Пайплайн подставляет SMTP-секреты в
+шаблон `alertmanager.yml.tmpl` и проверяет результат через `amtool check-config`,
+копирует каталог `observability/` на сервер, логинится в Docker Hub
 и поднимает стек наблюдаемости (`docker-compose.server.yml`: app, gateway, БД,
 Prometheus, Grafana, Alertmanager, Jaeger). После деплоя на сервере доступны
 Grafana `:3000`, Prometheus `:9090`, Jaeger `:16686`.

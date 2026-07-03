@@ -3,27 +3,19 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/evgenza/otus-app/internal/httpserver"
 	"github.com/evgenza/otus-app/internal/observability"
-)
-
-var (
-	appURL     string
-	httpClient = &http.Client{
-		Transport: otelhttp.NewTransport(http.DefaultTransport),
-		Timeout:   10 * time.Second,
-	}
 )
 
 func main() {
@@ -39,7 +31,7 @@ func run() error {
 	if port == "" {
 		port = "8090"
 	}
-	appURL = os.Getenv("APP_URL")
+	appURL := os.Getenv("APP_URL")
 	if appURL == "" {
 		appURL = "http://app:8080"
 	}
@@ -51,38 +43,36 @@ func run() error {
 	}
 	defer func() { _ = shutdownTracing(context.Background()) }()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", health)
-	mux.Handle("GET /metrics", promhttp.Handler())
-	mux.HandleFunc("POST /gw/messages", proxyCreate)
-	mux.HandleFunc("GET /gw/messages", proxyList)
+	g := &gateway{
+		appURL: appURL,
+		client: &http.Client{
+			Transport: otelhttp.NewTransport(http.DefaultTransport),
+			Timeout:   10 * time.Second,
+		},
+	}
 
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           observability.WrapHTTP("otus-gateway", mux),
+		Handler:           observability.WrapHTTP("otus-gateway", g.routes()),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		slog.Info("gateway запущен", "port", port, "app_url", appURL)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-	}()
+	slog.Info("gateway запущен", "port", port, "app_url", appURL)
+	return httpserver.Run(srv)
+}
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	select {
-	case err := <-errCh:
-		return err
-	case <-stop:
-	}
+type gateway struct {
+	appURL string
+	client *http.Client
+}
 
-	slog.Info("останавливаюсь...")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+func (g *gateway) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", health)
+	mux.Handle("GET /metrics", promhttp.Handler())
+	mux.HandleFunc("POST /gw/messages", g.proxyCreate)
+	mux.HandleFunc("GET /gw/messages", g.proxyList)
+	return mux
 }
 
 func health(w http.ResponseWriter, _ *http.Request) {
@@ -90,23 +80,29 @@ func health(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "работает"})
 }
 
-func proxyCreate(w http.ResponseWriter, r *http.Request) {
-	forward(w, r, http.MethodPost, r.Body)
+func (g *gateway) proxyCreate(w http.ResponseWriter, r *http.Request) {
+	g.forward(w, r, http.MethodPost, r.Body)
 }
 
-func proxyList(w http.ResponseWriter, r *http.Request) {
-	forward(w, r, http.MethodGet, nil)
+func (g *gateway) proxyList(w http.ResponseWriter, r *http.Request) {
+	g.forward(w, r, http.MethodGet, nil)
 }
 
-func forward(w http.ResponseWriter, r *http.Request, method string, body io.Reader) {
-	req, err := http.NewRequestWithContext(r.Context(), method, appURL+"/messages", body)
+func (g *gateway) forward(w http.ResponseWriter, r *http.Request, method string, body io.Reader) {
+	req, err := http.NewRequestWithContext(r.Context(), method, g.appURL+"/messages", body)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "не удалось собрать запрос")
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
+	copyHeaders(req.Header, r.Header)
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		if prior := r.Header.Get("X-Forwarded-For"); prior != "" {
+			host = prior + ", " + host
+		}
+		req.Header.Set("X-Forwarded-For", host)
+	}
 
-	resp, err := httpClient.Do(req)
+	resp, err := g.client.Do(req)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "запрос к app не удался", "err", err)
 		writeError(w, http.StatusBadGateway, "app недоступен")
@@ -114,9 +110,40 @@ func forward(w http.ResponseWriter, r *http.Request, method string, body io.Read
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	w.Header().Set("Content-Type", "application/json")
+	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+var hopHeaders = []string{
+	"Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+func copyHeaders(dst, src http.Header) {
+	for name, values := range src {
+		if isHopHeader(name) {
+			continue
+		}
+		for _, v := range values {
+			dst.Add(name, v)
+		}
+	}
+}
+
+func isHopHeader(name string) bool {
+	for _, h := range hopHeaders {
+		if strings.EqualFold(name, h) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

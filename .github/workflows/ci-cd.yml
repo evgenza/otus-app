@@ -117,6 +117,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Render Alertmanager config
+        env:
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+        run: |
+          envsubst '$SMTP_USERNAME $SMTP_PASSWORD $SMTP_TO' \
+            < observability/alertmanager/alertmanager.yml.tmpl \
+            > observability/alertmanager/alertmanager.yml
+          docker run --rm -v "$PWD/observability/alertmanager:/cfg:ro" \
+            --entrypoint /bin/amtool prom/alertmanager:v0.27.0 \
+            check-config /cfg/alertmanager.yml
+
       - name: Copy observability stack to server
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -127,7 +140,7 @@ jobs:
           source: "observability"
           target: "~"
 
-      - name: Render Alertmanager config and restart stack
+      - name: Restart stack
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -137,26 +150,6 @@ jobs:
           script: |
             set -e
             cd ~/observability
-            cat > alertmanager/alertmanager.yml <<EOF
-            global:
-              smtp_smarthost: "smtp.yandex.ru:587"
-              smtp_from: "${{ secrets.SMTP_USERNAME }}"
-              smtp_auth_username: "${{ secrets.SMTP_USERNAME }}"
-              smtp_auth_password: "${{ secrets.SMTP_PASSWORD }}"
-              smtp_require_tls: true
-            route:
-              receiver: email
-              group_wait: 10s
-              group_interval: 1m
-              repeat_interval: 1h
-            receivers:
-              - name: email
-                email_configs:
-                  - to: "${{ secrets.SMTP_TO }}"
-                    send_resolved: true
-                    headers:
-                      subject: "[otus-app] {{ .Status | toUpper }}: {{ .CommonAnnotations.summary }}"
-            EOF
 
             # Гасим прежний app+db стек, если остался от старого деплоя
             if [ -d ~/otus-app ]; then (cd ~/otus-app && docker compose down) || true; fi

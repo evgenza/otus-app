@@ -6,11 +6,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/evgenza/otus-app/internal/handlers"
+	"github.com/evgenza/otus-app/internal/httpserver"
 	"github.com/evgenza/otus-app/internal/observability"
 	"github.com/evgenza/otus-app/internal/storage"
 	"github.com/evgenza/otus-app/internal/version"
@@ -54,24 +53,6 @@ func run() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		slog.Info("сервис запущен", "version", version.Version, "port", port)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-	}()
-
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	select {
-	case err := <-errCh:
-		return err
-	case <-stop:
-	}
-
-	slog.Info("останавливаюсь...")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	slog.Info("сервис запущен", "version", version.Version, "port", port)
+	return httpserver.Run(srv)
 }
