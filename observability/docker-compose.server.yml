@@ -9,6 +9,7 @@ services:
       POSTGRES_USER: otus
       POSTGRES_PASSWORD: otus
       POSTGRES_DB: otus
+    mem_limit: 500m
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -88,11 +89,35 @@ services:
       KC_PROXY_HEADERS: xforwarded
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      JAVA_OPTS_KC_HEAP: "-Xms64m -Xmx256m"
+    mem_limit: 700m
     volumes:
       - ./keycloak:/opt/keycloak/data/import:ro
     depends_on:
       db:
         condition: service_healthy
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    restart: unless-stopped
+    environment:
+      OAUTH2_PROXY_PROVIDER: oidc
+      OAUTH2_PROXY_CLIENT_ID: oauth2-proxy
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET}
+      OAUTH2_PROXY_OIDC_ISSUER_URL: https://zhemchugovei.duckdns.org/auth/realms/otus
+      OAUTH2_PROXY_SKIP_OIDC_DISCOVERY: "true"
+      OAUTH2_PROXY_LOGIN_URL: https://zhemchugovei.duckdns.org/auth/realms/otus/protocol/openid-connect/auth
+      OAUTH2_PROXY_REDEEM_URL: http://keycloak:8080/auth/realms/otus/protocol/openid-connect/token
+      OAUTH2_PROXY_OIDC_JWKS_URL: http://keycloak:8080/auth/realms/otus/protocol/openid-connect/certs
+      OAUTH2_PROXY_REDIRECT_URL: https://zhemchugovei.duckdns.org/oauth2/callback
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_UPSTREAMS: static://202
+    depends_on:
+      - keycloak
 
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:v0.15.0
@@ -109,6 +134,8 @@ services:
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
       QUERY_BASE_PATH: /jaeger
+      MEMORY_MAX_TRACES: "10000"
+    mem_limit: 300m
 
   prometheus:
     image: prom/prometheus:v2.55.1
@@ -123,6 +150,7 @@ services:
       - ./certs/ca.crt:/etc/prometheus/certs/ca.crt:ro
       - ./certs/prometheus.crt:/etc/prometheus/certs/prometheus.crt:ro
       - ./certs/prometheus.key:/etc/prometheus/certs/prometheus.key:ro
+    mem_limit: 400m
     depends_on:
       - app
       - gateway
@@ -154,12 +182,49 @@ services:
       GF_AUTH_GENERIC_OAUTH_AUTH_URL: https://zhemchugovei.duckdns.org/auth/realms/otus/protocol/openid-connect/auth
       GF_AUTH_GENERIC_OAUTH_TOKEN_URL: http://keycloak:8080/auth/realms/otus/protocol/openid-connect/token
       GF_AUTH_GENERIC_OAUTH_API_URL: http://keycloak:8080/auth/realms/otus/protocol/openid-connect/userinfo
+    mem_limit: 300m
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
       - keycloak
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms256m -Xmx256m"
+    mem_limit: 800m
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    restart: unless-stopped
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      SERVER_BASEPATH: /kibana
+      SERVER_REWRITEBASEPATH: "true"
+      NODE_OPTIONS: "--max-old-space-size=300"
+    mem_limit: 600m
+    depends_on:
+      - elasticsearch
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.15.3
+    restart: unless-stopped
+    user: root
+    command: ["filebeat", "-e", "-strict.perms=false"]
+    mem_limit: 150m
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - elasticsearch
 
   nginx:
     image: nginx:1.27-alpine
@@ -183,6 +248,8 @@ services:
       - prometheus
       - jaeger
       - alertmanager
+      - oauth2-proxy
+      - kibana
 
   certbot:
     image: certbot/certbot:v2.11.0
@@ -194,3 +261,4 @@ services:
 
 volumes:
   pgdata:
+  esdata:

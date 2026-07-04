@@ -6,7 +6,7 @@
 Интернет ── HTTPS (Let's Encrypt) ──► nginx ──┬── mTLS ──► app ──► PostgreSQL
                                               ├── /gw/  ──► gateway ── mTLS ──► app
                                               ├── /auth/ ──► Keycloak (JWT)
-                                              └── /grafana/, /prometheus/, /jaeger/, /alertmanager/
+                                              └── /grafana/, /prometheus/, /jaeger/, /alertmanager/, /kibana/
 ```
 
 Четыре слоя защиты:
@@ -19,7 +19,8 @@
    Prometheus; посторонний процесс в сети до app не достучится.
 3. **JWT через Keycloak** — `POST /messages` требует токен. App проверяет
    подпись RS256 по JWKS Keycloak, срок действия и издателя. Grafana входит
-   через тот же Keycloak — единая точка авторизации.
+   через тот же Keycloak, а Prometheus/Alertmanager/Jaeger/Kibana закрыты
+   oauth2-proxy (nginx `auth_request`) — единая точка авторизации на всё.
 4. **Хеширование** — SHA-256 текста сообщения хранится в БД и сверяется при
    каждом чтении: подмена данных в обход API видна сразу.
 
@@ -107,6 +108,18 @@ App проверяет токен сам: скачивает JWKS realm-а, св
 Grafana авторизуется через тот же Keycloak (generic OAuth): на форме входа —
 кнопка «Keycloak», вход под пользователем realm-а.
 
+Prometheus, Alertmanager, Jaeger и Kibana своей авторизации не имеют, поэтому закрыты
+oauth2-proxy: на каждый запрос nginx делает `auth_request` в oauth2-proxy, без
+сессии Keycloak отдаёт редирект на страницу логина:
+
+```
+$ curl -sI https://zhemchugovei.duckdns.org/prometheus/ | head -2
+HTTP/1.1 302 Moved Temporarily
+Location: https://zhemchugovei.duckdns.org/oauth2/start?rd=...
+```
+
+После входа под пользователем realm-а UI открываются как обычно.
+
 ![Вход в Keycloak](screenshots/15-keycloak.png)
 ![Grafana через Keycloak](screenshots/16-grafana-oauth.png)
 
@@ -144,8 +157,10 @@ $ curl -s https://zhemchugovei.duckdns.org/messages | jq '.[0]'
   в git — только скрипт (`observability/certs/gen-certs.sh`);
 - realm Keycloak и конфиг Alertmanager лежат в репозитории шаблонами, секреты
   подставляются в CI из GitHub Secrets (`envsubst`);
-- пароли Keycloak/Grafana задаются секретами `KEYCLOAK_ADMIN_PASSWORD`,
-  `GRAFANA_ADMIN_PASSWORD`, `GRAFANA_OAUTH_SECRET`, `DEMO_USER_PASSWORD`.
+- пароли Keycloak/Grafana и секреты oauth2-proxy задаются секретами
+  `KEYCLOAK_ADMIN_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`, `GRAFANA_OAUTH_SECRET`,
+  `OAUTH2_PROXY_CLIENT_SECRET`, `OAUTH2_PROXY_COOKIE_SECRET`,
+  `DEMO_USER_PASSWORD`.
 
 ## Оценка
 
@@ -157,9 +172,9 @@ $ curl -s https://zhemchugovei.duckdns.org/messages | jq '.[0]'
   локальная (по JWKS), лишних походов в Keycloak на каждый запрос нет.
 - Целостность данных контролируется на уровне приложения: ручная правка БД
   видна в API мгновенно.
-- Из незакрытого: Prometheus/Jaeger/Alertmanager проксируются без собственной
-  авторизации — следующий шаг напрашивается oauth2-proxy перед ними через тот
-  же Keycloak.
+- Все веб-морды закрыты одной точкой авторизации: Grafana — родным OAuth,
+  Prometheus/Alertmanager/Jaeger/Kibana — через oauth2-proxy, и всё это один
+  Keycloak с одними и теми же пользователями.
 
 ## Pull request
 
