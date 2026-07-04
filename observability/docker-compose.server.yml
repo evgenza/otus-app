@@ -208,8 +208,8 @@ services:
       ELASTICSEARCH_HOSTS: http://elasticsearch:9200
       SERVER_BASEPATH: /kibana
       SERVER_REWRITEBASEPATH: "true"
-      NODE_OPTIONS: "--max-old-space-size=300"
-    mem_limit: 600m
+      NODE_OPTIONS: "--max-old-space-size=512"
+    mem_limit: 800m
     depends_on:
       - elasticsearch
 
