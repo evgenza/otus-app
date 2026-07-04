@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/evgenza/otus-app/internal/security"
 )
 
 type fakeStore struct {
@@ -20,7 +22,13 @@ func (f *fakeStore) Create(_ context.Context, text string) (Message, error) {
 	if f.failAll {
 		return Message{}, errors.New("сбой хранилища")
 	}
-	m := Message{ID: int64(len(f.items) + 1), Text: text, CreatedAt: time.Now()}
+	m := Message{
+		ID:         int64(len(f.items) + 1),
+		Text:       text,
+		Checksum:   security.Checksum(text),
+		ChecksumOK: true,
+		CreatedAt:  time.Now(),
+	}
 	f.items = append(f.items, m)
 	return m, nil
 }
@@ -42,7 +50,7 @@ func do(t *testing.T, store MessageStore, method, path, body string) *httptest.R
 	}
 	req := httptest.NewRequest(method, path, reader)
 	rec := httptest.NewRecorder()
-	New(store).ServeHTTP(rec, req)
+	New(store, nil).ServeHTTP(rec, req)
 	return rec
 }
 
@@ -103,6 +111,9 @@ func TestCreateMessage(t *testing.T) {
 	}
 	if msg.ID == 0 || msg.Text != "привет" {
 		t.Fatalf("неожиданное сообщение: %+v", msg)
+	}
+	if msg.Checksum != security.Checksum("привет") || !msg.ChecksumOK {
+		t.Fatalf("контрольная сумма не заполнена: %+v", msg)
 	}
 	if len(store.items) != 1 {
 		t.Fatalf("ожидалось 1 сообщение в хранилище, получено %d", len(store.items))

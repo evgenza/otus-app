@@ -15,8 +15,10 @@ HTTP-сервер на порту 8080:
 - `GET /version` — версия и дата сборки.
 - `GET /hello` — `{"message":"Привет, мир!"}`, можно передать `?name=...`.
 - `POST /messages` — принимает `{"text":"..."}`, сохраняет сообщение в БД,
-  возвращает созданную запись с `id` и `created_at`.
-- `GET /messages` — список последних сообщений из БД.
+  возвращает созданную запись с `id`, `created_at` и контрольной суммой текста.
+  Требует JWT из Keycloak (заголовок `Authorization: Bearer ...`).
+- `GET /messages` — список последних сообщений из БД, у каждого — результат
+  проверки контрольной суммы (`checksum_ok`).
 
 Версия и дата зашиваются в бинарь при компиляции через `-ldflags`
 (пакет `internal/version`).
@@ -28,11 +30,16 @@ cmd/app/main.go                       точка входа app: HTTP-серве
 cmd/gateway/main.go                   второй сервис: проксирует запросы в app
 internal/handlers/                    роуты, обработчики и юнит-тесты
 internal/httpserver/                  запуск HTTP-сервера с graceful shutdown
+internal/security/                    mTLS, проверка JWT, контрольные суммы
 internal/storage/                     работа с PostgreSQL + интеграционные тесты
 internal/observability/               логи (slog), метрики (Prometheus), трейсинг (OTel)
 internal/version/                     версия сборки
 loadtest/script.js                    нагрузочный сценарий k6
-observability/                        стек наблюдаемости (Prometheus, Grafana, ELK, Jaeger)
+observability/                        стек наблюдаемости и безопасности (Prometheus, Grafana,
+                                      ELK, Jaeger, Keycloak, nginx)
+observability/certs/gen-certs.sh      генерация внутреннего CA и сертификатов mTLS
+observability/keycloak/               шаблон realm Keycloak
+observability/nginx/                  конфиг реверс-прокси с TLS
 .github/workflows/ci-cd.yml           основной пайплайн (lint, unit, build, deploy)
 .github/workflows/integration.yml     интеграционные тесты (ручной запуск)
 .github/workflows/loadtest.yml        нагрузочный тест k6 (ручной запуск)
@@ -41,6 +48,7 @@ docker-compose.yml                    запуск app + postgres
 docs/REPORT.md                        отчёт по сборке/деплою
 docs/TEST-REPORT.md                   протокол тестирования
 docs/OBSERVABILITY.md                 протокол проверки наблюдаемости
+docs/SECURITY.md                      протокол проверки защиты (TLS, JWT, хеширование)
 ```
 
 ## Требования
@@ -65,14 +73,23 @@ make build    # бинарь в bin/otus-app
 make fmt lint test build
 ```
 
-Проще всего поднять приложение вместе с базой через compose:
+Проще всего поднять всё через compose в `observability/` (перед первым запуском
+сгенерировать сертификаты и отрендерить realm Keycloak):
 
 ```bash
-make docker-up          # app + postgres
-curl localhost:8080/health
-curl -X POST localhost:8080/messages -d '{"text":"привет"}'
-curl localhost:8080/messages
-make docker-down
+cd observability
+sh certs/gen-certs.sh
+GRAFANA_OAUTH_SECRET=dev DEMO_USER_PASSWORD=demo123 \
+  envsubst < keycloak/realm-otus.json.tmpl > keycloak/realm-otus.json
+docker compose up -d
+```
+
+App принимает только mTLS-подключения, поэтому curl ходит с клиентским
+сертификатом:
+
+```bash
+curl --cacert certs/ca.crt --cert certs/gateway.crt --key certs/gateway.key \
+  https://localhost:8080/health
 ```
 
 Запуск бинаря напрямую (нужен поднятый Postgres):
@@ -103,9 +120,13 @@ DATABASE_URL='postgres://otus:otus@localhost:5432/otus?sslmode=disable' \
 **Нагрузочное тестирование** (k6) против развёрнутого сервиса:
 
 ```bash
-docker run --rm -e BASE_URL=http://82.202.142.225:8080 \
+docker run --rm -e BASE_URL=https://zhemchugovei.duckdns.org \
+  -e AUTH_USER=evgenza -e AUTH_PASS='пароль пользователя' \
   -v "$PWD/loadtest:/loadtest" grafana/k6 run /loadtest/script.js
 ```
+
+Сценарий сам получает JWT в Keycloak (`setup()`) и шлёт `POST /messages` с
+заголовком `Authorization`.
 
 Протокол испытаний и анализ — в [docs/TEST-REPORT.md](docs/TEST-REPORT.md).
 
@@ -126,7 +147,7 @@ docker compose up -d
 ```
 
 После старта доступно: Grafana `:3000`, Prometheus `:9090`, Alertmanager
-`:9093`, Jaeger `:16686`, Kibana `:5601`.
+`:9093`, Jaeger `:16686/jaeger`, Kibana `:5601`, Keycloak `:8081/auth`.
 
 - **Логи** → Filebeat → Elasticsearch → Kibana (data view `otus-logs*`);
 - **Метрики** → Prometheus → дашборд Grafana;
@@ -135,6 +156,35 @@ docker compose up -d
 - **Трейсы** цепочки gateway→app→БД → Jaeger.
 
 Протокол проверки — в [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
+
+## Безопасность
+
+- **mTLS между сервисами.** App принимает только TLS-подключения с клиентским
+  сертификатом, подписанным внутренним CA (`observability/certs/gen-certs.sh`).
+  Клиентские сертификаты есть у gateway, nginx и Prometheus. Включается
+  переменными `TLS_CERT_FILE` / `TLS_KEY_FILE` / `TLS_CA_FILE` (без них сервис
+  работает по HTTP — так гоняются юнит- и интеграционные тесты).
+- **TLS снаружи.** nginx терминирует HTTPS с сертификатом Let's Encrypt для
+  `zhemchugovei.duckdns.org`, порт 80 отдаёт только редирект и ACME-челлендж.
+- **JWT через Keycloak.** `POST /messages` требует токен: app скачивает JWKS
+  из Keycloak (`AUTH_JWKS_URL`), проверяет подпись RS256, срок действия и
+  издателя (`AUTH_ISSUER`). Grafana логинится через тот же Keycloak (OAuth).
+- **Хеширование данных.** При сохранении сообщения считается SHA-256 текста и
+  кладётся в БД рядом с ним; при чтении хеш пересчитывается — подмена данных в
+  обход API видна по `checksum_ok: false`.
+
+Получить токен и создать сообщение:
+
+```bash
+TOKEN=$(curl -s -X POST \
+  https://zhemchugovei.duckdns.org/auth/realms/otus/protocol/openid-connect/token \
+  -d grant_type=password -d client_id=otus-app \
+  -d username=evgenza -d password='...' | jq -r .access_token)
+curl -X POST https://zhemchugovei.duckdns.org/messages \
+  -H "Authorization: Bearer $TOKEN" -d '{"text":"привет"}'
+```
+
+Протокол проверки — в [docs/SECURITY.md](docs/SECURITY.md).
 
 ## CI/CD
 
@@ -155,14 +205,23 @@ docker compose up -d
   (`workflow_dispatch`).
 
 Секреты репозитория: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `SSH_HOST`,
-`SSH_USER`, `SSH_PORT`, `SSH_KEY`, а также `SMTP_USERNAME`, `SMTP_PASSWORD`,
-`SMTP_TO` для писем-алертов на сервере.
+`SSH_USER`, `SSH_PORT`, `SSH_KEY`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TO`
+(письма-алерты), `KEYCLOAK_ADMIN_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`,
+`GRAFANA_OAUTH_SECRET`, `DEMO_USER_PASSWORD` (Keycloak и Grafana).
 
 ## Деплой на сервер
 
-На сервере нужны Docker и плагин compose. Пайплайн подставляет SMTP-секреты в
-шаблон `alertmanager.yml.tmpl` и проверяет результат через `amtool check-config`,
-копирует каталог `observability/` на сервер, логинится в Docker Hub
-и поднимает стек наблюдаемости (`docker-compose.server.yml`: app, gateway, БД,
-Prometheus, Grafana, Alertmanager, Jaeger). После деплоя на сервере доступны
-Grafana `:3000`, Prometheus `:9090`, Jaeger `:16686`.
+На сервере нужны Docker и плагин compose. Пайплайн рендерит из шаблонов конфиг
+Alertmanager и realm Keycloak (секреты подставляются через `envsubst`), копирует
+каталог `observability/` на сервер, генерирует внутренний CA и сертификаты mTLS,
+при первом деплое выпускает сертификат Let's Encrypt, и поднимает стек
+(`docker-compose.server.yml`: nginx, app, gateway, Keycloak, БД, Prometheus,
+Grafana, Alertmanager, Jaeger, certbot).
+
+Наружу открыты только 80/443, всё ходит через nginx:
+
+- <https://zhemchugovei.duckdns.org/> — API app (`/hello`, `/messages`, ...)
+- <https://zhemchugovei.duckdns.org/gw/messages> — gateway
+- <https://zhemchugovei.duckdns.org/auth/> — Keycloak
+- <https://zhemchugovei.duckdns.org/grafana/> — Grafana (вход через Keycloak)
+- <https://zhemchugovei.duckdns.org/prometheus/>, `/alertmanager/`, `/jaeger/`

@@ -11,6 +11,7 @@ import (
 	"github.com/evgenza/otus-app/internal/handlers"
 	"github.com/evgenza/otus-app/internal/httpserver"
 	"github.com/evgenza/otus-app/internal/observability"
+	"github.com/evgenza/otus-app/internal/security"
 	"github.com/evgenza/otus-app/internal/storage"
 	"github.com/evgenza/otus-app/internal/version"
 )
@@ -47,12 +48,18 @@ func run() error {
 	}
 	defer store.Close()
 
-	srv := &http.Server{
-		Addr:              ":" + port,
-		Handler:           handlers.New(store),
-		ReadHeaderTimeout: 5 * time.Second,
+	tlsCfg, err := security.ServerTLS()
+	if err != nil {
+		return err
 	}
 
-	slog.Info("сервис запущен", "version", version.Version, "port", port)
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           handlers.New(store, security.NewAuth()),
+		ReadHeaderTimeout: 5 * time.Second,
+		TLSConfig:         tlsCfg,
+	}
+
+	slog.Info("сервис запущен", "version", version.Version, "port", port, "mtls", tlsCfg != nil)
 	return httpserver.Run(srv)
 }

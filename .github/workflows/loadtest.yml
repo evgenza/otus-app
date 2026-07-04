@@ -5,7 +5,7 @@ on:
     inputs:
       base_url:
         description: "Базовый URL развёрнутого сервиса"
-        default: "http://82.202.142.225:8080"
+        default: "https://zhemchugovei.duckdns.org"
 
 jobs:
   k6:
@@ -18,5 +18,7 @@ jobs:
         run: |
           docker run --rm -i \
             -e BASE_URL="${{ inputs.base_url }}" \
+            -e AUTH_USER=evgenza \
+            -e AUTH_PASS="${{ secrets.DEMO_USER_PASSWORD }}" \
             -v "$PWD/loadtest:/loadtest" \
             grafana/k6 run /loadtest/script.js

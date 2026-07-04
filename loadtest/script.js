@@ -1,7 +1,8 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 
-const BASE_URL = __ENV.BASE_URL || 'http://82.202.142.225:8080';
+const BASE_URL = __ENV.BASE_URL || 'https://zhemchugovei.duckdns.org';
+const TOKEN_URL = __ENV.TOKEN_URL || `${BASE_URL}/auth/realms/otus/protocol/openid-connect/token`;
 
 export const options = {
   scenarios: {
@@ -33,6 +34,17 @@ export const options = {
   },
 };
 
+export function setup() {
+  const res = http.post(TOKEN_URL, {
+    grant_type: 'password',
+    client_id: 'otus-app',
+    username: __ENV.AUTH_USER,
+    password: __ENV.AUTH_PASS,
+  });
+  check(res, { 'setup: токен получен': (r) => r.status === 200 });
+  return { token: res.json('access_token') };
+}
+
 export function single() {
   const res = http.get(`${BASE_URL}/hello?name=k6`);
   check(res, {
@@ -42,9 +54,12 @@ export function single() {
   sleep(0.1);
 }
 
-export function e2e() {
+export function e2e(data) {
   const payload = JSON.stringify({ text: `нагрузка ${__VU}-${__ITER}` });
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${data.token}`,
+  };
 
   const created = http.post(`${BASE_URL}/messages`, payload, { headers });
   check(created, {
