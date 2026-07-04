@@ -130,6 +130,16 @@ jobs:
             --entrypoint /bin/amtool prom/alertmanager:v0.27.0 \
             check-config /cfg/alertmanager.yml
 
+      - name: Render Keycloak realm
+        env:
+          GRAFANA_OAUTH_SECRET: ${{ secrets.GRAFANA_OAUTH_SECRET }}
+          DEMO_USER_PASSWORD: ${{ secrets.DEMO_USER_PASSWORD }}
+        run: |
+          envsubst '$GRAFANA_OAUTH_SECRET $DEMO_USER_PASSWORD' \
+            < observability/keycloak/realm-otus.json.tmpl \
+            > observability/keycloak/realm-otus.json
+          python3 -m json.tool observability/keycloak/realm-otus.json > /dev/null
+
       - name: Copy observability stack to server
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -151,11 +161,43 @@ jobs:
             set -e
             cd ~/observability
 
+            # Внутренний CA и сертификаты mTLS (генерируются один раз)
+            sh certs/gen-certs.sh
+
+            # Секреты для docker compose
+            umask 077
+            cat > .env <<'ENV'
+            KEYCLOAK_ADMIN_PASSWORD=${{ secrets.KEYCLOAK_ADMIN_PASSWORD }}
+            GRAFANA_ADMIN_PASSWORD=${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+            GRAFANA_OAUTH_SECRET=${{ secrets.GRAFANA_OAUTH_SECRET }}
+            ENV
+            umask 022
+
+            # Сертификат Let's Encrypt (выпускается один раз, дальше продлевает certbot)
+            if [ ! -f letsencrypt/live/zhemchugovei.duckdns.org/fullchain.pem ]; then
+              docker rm -f otus-nginx 2>/dev/null || true
+              docker run --rm -p 80:80 \
+                -v "$PWD/letsencrypt:/etc/letsencrypt" \
+                certbot/certbot:v2.11.0 certonly --standalone \
+                -d zhemchugovei.duckdns.org \
+                --agree-tos --register-unsafely-without-email --non-interactive
+            fi
+
             # Гасим прежний app+db стек, если остался от старого деплоя
             if [ -d ~/otus-app ]; then (cd ~/otus-app && docker compose down) || true; fi
 
             echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
             export TAG=latest
+
+            # База для Keycloak в общем Postgres
+            docker compose -f docker-compose.server.yml up -d db
+            for i in $(seq 1 30); do
+              docker exec otus-db pg_isready -U otus -d otus >/dev/null 2>&1 && break
+              sleep 2
+            done
+            docker exec otus-db psql -U otus -d otus -tc "SELECT 1 FROM pg_database WHERE datname='keycloak'" | grep -q 1 \
+              || docker exec otus-db createdb -U otus keycloak
+
             docker compose -f docker-compose.server.yml pull
             docker compose -f docker-compose.server.yml up -d
             docker compose -f docker-compose.server.yml ps

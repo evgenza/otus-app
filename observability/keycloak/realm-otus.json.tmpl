@@ -1,0 +1,45 @@
+{
+  "realm": "otus",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "clients": [
+    {
+      "clientId": "otus-app",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false
+    },
+    {
+      "clientId": "grafana",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "${GRAFANA_OAUTH_SECRET}",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "rootUrl": "https://zhemchugovei.duckdns.org/grafana/",
+      "redirectUris": ["https://zhemchugovei.duckdns.org/grafana/login/generic_oauth"]
+    }
+  ],
+  "users": [
+    {
+      "username": "evgenza",
+      "enabled": true,
+      "email": "zhemchugov97@yandex.ru",
+      "emailVerified": true,
+      "firstName": "Евгений",
+      "lastName": "Жемчугов",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${DEMO_USER_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

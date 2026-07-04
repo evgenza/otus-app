@@ -11,13 +11,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/evgenza/otus-app/internal/observability"
+	"github.com/evgenza/otus-app/internal/security"
 	"github.com/evgenza/otus-app/internal/version"
 )
 
 type Message struct {
-	ID        int64     `json:"id"`
-	Text      string    `json:"text"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         int64     `json:"id"`
+	Text       string    `json:"text"`
+	Checksum   string    `json:"checksum"`
+	ChecksumOK bool      `json:"checksum_ok"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type MessageStore interface {
@@ -29,13 +32,13 @@ type API struct {
 	store MessageStore
 }
 
-func New(store MessageStore) http.Handler {
+func New(store MessageStore, auth *security.Auth) http.Handler {
 	a := &API{store: store}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
 	mux.HandleFunc("GET /version", versionInfo)
 	mux.HandleFunc("GET /hello", hello)
-	mux.HandleFunc("POST /messages", a.createMessage)
+	mux.Handle("POST /messages", auth.Middleware(http.HandlerFunc(a.createMessage)))
 	mux.HandleFunc("GET /messages", a.listMessages)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("GET /", hello)

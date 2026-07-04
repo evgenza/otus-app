@@ -27,11 +27,24 @@ services:
       DATABASE_URL: postgres://otus:otus@db:5432/otus?sslmode=disable
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      TLS_CERT_FILE: /certs/app.crt
+      TLS_KEY_FILE: /certs/app.key
+      TLS_CA_FILE: /certs/ca.crt
+      AUTH_JWKS_URL: http://keycloak:8080/auth/realms/otus/protocol/openid-connect/certs
+      AUTH_ISSUER: https://zhemchugovei.duckdns.org/auth/realms/otus
+    volumes:
+      - ./certs/app.crt:/certs/app.crt:ro
+      - ./certs/app.key:/certs/app.key:ro
+      - ./certs/ca.crt:/certs/ca.crt:ro
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--cacert", "/certs/ca.crt", "--cert", "/certs/app.crt", "--key", "/certs/app.key", "https://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
   gateway:
     image: evgenza/otus-app:${TAG:-latest}
@@ -40,19 +53,46 @@ services:
     entrypoint: ["/app/gateway"]
     environment:
       PORT: "8090"
-      APP_URL: http://app:8080
+      APP_URL: https://app:8080
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      TLS_CERT_FILE: /certs/gateway.crt
+      TLS_KEY_FILE: /certs/gateway.key
+      TLS_CA_FILE: /certs/ca.crt
+    volumes:
+      - ./certs/gateway.crt:/certs/gateway.crt:ro
+      - ./certs/gateway.key:/certs/gateway.key:ro
+      - ./certs/ca.crt:/certs/ca.crt:ro
     depends_on:
       - app
-    ports:
-      - "8090:8090"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
       interval: 30s
       timeout: 3s
       retries: 3
       start_period: 5s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: otus-keycloak
+    restart: unless-stopped
+    command: ["start", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://db:5432/keycloak
+      KC_DB_USERNAME: otus
+      KC_DB_PASSWORD: otus
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HOSTNAME: https://zhemchugovei.duckdns.org/auth
+      KC_PROXY_HEADERS: xforwarded
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    depends_on:
+      db:
+        condition: service_healthy
 
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:v0.15.0
@@ -68,19 +108,21 @@ services:
     restart: unless-stopped
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
-    ports:
-      - "16686:16686"
+      QUERY_BASE_PATH: /jaeger
 
   prometheus:
     image: prom/prometheus:v2.55.1
     restart: unless-stopped
     command:
       - --config.file=/etc/prometheus/prometheus.yml
+      - --web.external-url=https://zhemchugovei.duckdns.org/prometheus/
+      - --web.route-prefix=/
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
-    ports:
-      - "9090:9090"
+      - ./certs/ca.crt:/etc/prometheus/certs/ca.crt:ro
+      - ./certs/prometheus.crt:/etc/prometheus/certs/prometheus.crt:ro
+      - ./certs/prometheus.key:/etc/prometheus/certs/prometheus.key:ro
     depends_on:
       - app
       - gateway
@@ -90,25 +132,65 @@ services:
     restart: unless-stopped
     command:
       - --config.file=/etc/alertmanager/alertmanager.yml
+      - --web.external-url=https://zhemchugovei.duckdns.org/alertmanager/
+      - --web.route-prefix=/
     volumes:
       - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-    ports:
-      - "9093:9093"
 
   grafana:
     image: grafana/grafana:11.3.0
     restart: unless-stopped
     environment:
+      GF_SERVER_ROOT_URL: https://zhemchugovei.duckdns.org/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
+      GF_AUTH_GENERIC_OAUTH_NAME: Keycloak
+      GF_AUTH_GENERIC_OAUTH_CLIENT_ID: grafana
+      GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET: ${GRAFANA_OAUTH_SECRET}
+      GF_AUTH_GENERIC_OAUTH_SCOPES: openid email profile
+      GF_AUTH_GENERIC_OAUTH_AUTH_URL: https://zhemchugovei.duckdns.org/auth/realms/otus/protocol/openid-connect/auth
+      GF_AUTH_GENERIC_OAUTH_TOKEN_URL: http://keycloak:8080/auth/realms/otus/protocol/openid-connect/token
+      GF_AUTH_GENERIC_OAUTH_API_URL: http://keycloak:8080/auth/realms/otus/protocol/openid-connect/userinfo
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-    ports:
-      - "3000:3000"
     depends_on:
       - prometheus
+      - keycloak
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: otus-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./letsencrypt:/etc/letsencrypt:ro
+      - ./certbot-www:/var/www/certbot:ro
+      - ./certs/nginx.crt:/etc/nginx/certs/nginx.crt:ro
+      - ./certs/nginx.key:/etc/nginx/certs/nginx.key:ro
+      - ./certs/ca.crt:/etc/nginx/certs/ca.crt:ro
+    depends_on:
+      - app
+      - gateway
+      - keycloak
+      - grafana
+      - prometheus
+      - jaeger
+      - alertmanager
+
+  certbot:
+    image: certbot/certbot:v2.11.0
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c", "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"]
+    volumes:
+      - ./letsencrypt:/etc/letsencrypt
+      - ./certbot-www:/var/www/certbot
 
 volumes:
   pgdata:

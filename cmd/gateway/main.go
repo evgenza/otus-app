@@ -16,6 +16,7 @@ import (
 
 	"github.com/evgenza/otus-app/internal/httpserver"
 	"github.com/evgenza/otus-app/internal/observability"
+	"github.com/evgenza/otus-app/internal/security"
 )
 
 func main() {
@@ -43,10 +44,19 @@ func run() error {
 	}
 	defer func() { _ = shutdownTracing(context.Background()) }()
 
+	clientTLS, err := security.ClientTLS()
+	if err != nil {
+		return err
+	}
+	transport := http.DefaultTransport
+	if clientTLS != nil {
+		transport = &http.Transport{TLSClientConfig: clientTLS}
+	}
+
 	g := &gateway{
 		appURL: appURL,
 		client: &http.Client{
-			Transport: otelhttp.NewTransport(http.DefaultTransport),
+			Transport: otelhttp.NewTransport(transport),
 			Timeout:   10 * time.Second,
 		},
 	}

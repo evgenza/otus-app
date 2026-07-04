@@ -14,7 +14,13 @@ func Run(srv *http.Server) error {
 	defer stop()
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ListenAndServe() }()
+	go func() {
+		if srv.TLSConfig != nil {
+			errCh <- srv.ListenAndServeTLS("", "")
+		} else {
+			errCh <- srv.ListenAndServe()
+		}
+	}()
 
 	select {
 	case err := <-errCh:

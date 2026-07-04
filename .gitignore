@@ -17,3 +17,6 @@ observability/alertmanager/alertmanager.yml
 .idea/
 .vscode/
 .DS_Store
+
+# Realm Keycloak рендерится из шаблона с секретами
+observability/keycloak/realm-otus.json

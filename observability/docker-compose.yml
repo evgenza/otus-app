@@ -24,20 +24,42 @@ services:
       DATABASE_URL: postgres://otus:otus@db:5432/otus?sslmode=disable
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      TLS_CERT_FILE: /certs/app.crt
+      TLS_KEY_FILE: /certs/app.key
+      TLS_CA_FILE: /certs/ca.crt
+      AUTH_JWKS_URL: http://keycloak:8080/auth/realms/otus/protocol/openid-connect/certs
+      AUTH_ISSUER: http://localhost:8081/auth/realms/otus
+    volumes:
+      - ./certs/app.crt:/certs/app.crt:ro
+      - ./certs/app.key:/certs/app.key:ro
+      - ./certs/ca.crt:/certs/ca.crt:ro
     depends_on:
       db:
         condition: service_healthy
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--cacert", "/certs/ca.crt", "--cert", "/certs/app.crt", "--key", "/certs/app.key", "https://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
   gateway:
     image: evgenza/otus-app:obs
     entrypoint: ["/app/gateway"]
     environment:
       PORT: "8090"
-      APP_URL: http://app:8080
+      APP_URL: https://app:8080
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      TLS_CERT_FILE: /certs/gateway.crt
+      TLS_KEY_FILE: /certs/gateway.key
+      TLS_CA_FILE: /certs/ca.crt
+    volumes:
+      - ./certs/gateway.crt:/certs/gateway.crt:ro
+      - ./certs/gateway.key:/certs/gateway.key:ro
+      - ./certs/ca.crt:/certs/ca.crt:ro
     depends_on:
       - app
     ports:
@@ -48,6 +70,18 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    ports:
+      - "8081:8080"
 
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:v0.15.0
@@ -61,6 +95,7 @@ services:
     image: jaegertracing/all-in-one:1.62.0
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
+      QUERY_BASE_PATH: /jaeger
     ports:
       - "16686:16686"
 
@@ -71,6 +106,9 @@ services:
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./certs/ca.crt:/etc/prometheus/certs/ca.crt:ro
+      - ./certs/prometheus.crt:/etc/prometheus/certs/prometheus.crt:ro
+      - ./certs/prometheus.key:/etc/prometheus/certs/prometheus.key:ro
     ports:
       - "9090:9090"
     depends_on:
