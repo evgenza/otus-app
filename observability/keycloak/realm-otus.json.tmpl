@@ -22,6 +22,16 @@
       "directAccessGrantsEnabled": false,
       "rootUrl": "https://zhemchugovei.duckdns.org/grafana/",
       "redirectUris": ["https://zhemchugovei.duckdns.org/grafana/login/generic_oauth"]
+    },
+    {
+      "clientId": "oauth2-proxy",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "${OAUTH2_PROXY_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["https://zhemchugovei.duckdns.org/oauth2/callback"]
     }
   ],
   "users": [

@@ -168,7 +168,9 @@ docker compose up -d
   `zhemchugovei.duckdns.org`, порт 80 отдаёт только редирект и ACME-челлендж.
 - **JWT через Keycloak.** `POST /messages` требует токен: app скачивает JWKS
   из Keycloak (`AUTH_JWKS_URL`), проверяет подпись RS256, срок действия и
-  издателя (`AUTH_ISSUER`). Grafana логинится через тот же Keycloak (OAuth).
+  издателя (`AUTH_ISSUER`). Grafana логинится через тот же Keycloak (OAuth),
+  а Prometheus, Alertmanager и Jaeger закрыты oauth2-proxy — nginx пускает к
+  ним только с сессией Keycloak (`auth_request`).
 - **Хеширование данных.** При сохранении сообщения считается SHA-256 текста и
   кладётся в БД рядом с ним; при чтении хеш пересчитывается — подмена данных в
   обход API видна по `checksum_ok: false`.
@@ -207,7 +209,8 @@ curl -X POST https://zhemchugovei.duckdns.org/messages \
 Секреты репозитория: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `SSH_HOST`,
 `SSH_USER`, `SSH_PORT`, `SSH_KEY`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TO`
 (письма-алерты), `KEYCLOAK_ADMIN_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`,
-`GRAFANA_OAUTH_SECRET`, `DEMO_USER_PASSWORD` (Keycloak и Grafana).
+`GRAFANA_OAUTH_SECRET`, `OAUTH2_PROXY_CLIENT_SECRET`, `OAUTH2_PROXY_COOKIE_SECRET`,
+`DEMO_USER_PASSWORD` (Keycloak, Grafana и oauth2-proxy).
 
 ## Деплой на сервер
 
@@ -216,7 +219,9 @@ Alertmanager и realm Keycloak (секреты подставляются чер
 каталог `observability/` на сервер, генерирует внутренний CA и сертификаты mTLS,
 при первом деплое выпускает сертификат Let's Encrypt, и поднимает стек
 (`docker-compose.server.yml`: nginx, app, gateway, Keycloak, БД, Prometheus,
-Grafana, Alertmanager, Jaeger, certbot).
+Grafana, Alertmanager, Jaeger, ELK, certbot). Чтобы всё влезло в 4Gi памяти,
+тяжёлым контейнерам заданы `mem_limit` и ужаты heap-ы (Elasticsearch и
+Keycloak — по 256m).
 
 Наружу открыты только 80/443, всё ходит через nginx:
 
@@ -224,4 +229,6 @@ Grafana, Alertmanager, Jaeger, certbot).
 - <https://zhemchugovei.duckdns.org/gw/messages> — gateway
 - <https://zhemchugovei.duckdns.org/auth/> — Keycloak
 - <https://zhemchugovei.duckdns.org/grafana/> — Grafana (вход через Keycloak)
-- <https://zhemchugovei.duckdns.org/prometheus/>, `/alertmanager/`, `/jaeger/`
+- <https://zhemchugovei.duckdns.org/prometheus/>, `/alertmanager/`, `/jaeger/`,
+  `/kibana/` — за oauth2-proxy: без сессии Keycloak nginx отправляет на
+  страницу логина
