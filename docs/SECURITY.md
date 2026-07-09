@@ -131,14 +131,14 @@ Location: https://zhemchugovei.duckdns.org/oauth2/start?rd=...
 
 ```
 $ docker exec otus-db psql -U otus -d otus \
-    -c "UPDATE messages SET text='подменённый текст' WHERE id=8146"
+    -c "UPDATE messages SET text='подменённый текст' WHERE id=3260"
 UPDATE 1
 
 $ curl -s https://zhemchugovei.duckdns.org/messages | jq '.[0]'
 {
-  "id": 8146,
+  "id": 3260,
   "text": "подменённый текст",
-  "checksum": "7cb1c348f69228920a8f9b607941ded9c705334d49fe54c583f78090a98d524a",
+  "checksum": "9756c90266c5c1c804e3f95fbe1aa1c66f2eac8f7c71ea5fe725619edb2ab764",
   "checksum_ok": false,
   ...
 }
