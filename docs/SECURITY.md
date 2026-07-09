@@ -178,4 +178,5 @@ $ curl -s https://zhemchugovei.duckdns.org/messages | jq '.[0]'
 
 ## Pull request
 
-[PR с защитой взаимодействия](https://github.com/evgenza/otus-app/pulls)
+- [PR #9 — mTLS, TLS через nginx, Keycloak, контрольные суммы](https://github.com/evgenza/otus-app/pull/9)
+- [PR #10 — веб-интерфейсы за oauth2-proxy, ELK на сервере](https://github.com/evgenza/otus-app/pull/10)
