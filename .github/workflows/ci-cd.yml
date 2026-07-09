@@ -85,6 +85,8 @@ jobs:
           cache: false
 
       - name: Go vulnerability scan
+        env:
+          GOTOOLCHAIN: auto
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       - name: Dependency scan
