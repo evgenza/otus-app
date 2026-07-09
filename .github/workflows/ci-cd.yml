@@ -63,12 +63,49 @@ jobs:
         run: go build ./...
 
   # --------------------------------------------------------------------------
+  # Этап 2.5: проверки безопасности — секреты, уязвимости, конфиги
+  # --------------------------------------------------------------------------
+  security:
+    name: Security checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Secret scanning
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Go vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Dependency scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Validate security configs
+        run: bash scripts/check-configs.sh
+
+  # --------------------------------------------------------------------------
   # Этап 3: сборка Docker-образа и публикация в Docker Hub
   # --------------------------------------------------------------------------
   build-and-push:
     name: Build & Push image
     runs-on: ubuntu-latest
-    needs: [lint, test]
+    needs: [lint, test, security]
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v5
@@ -204,3 +241,17 @@ jobs:
             docker compose -f docker-compose.server.yml pull
             docker compose -f docker-compose.server.yml up -d
             docker compose -f docker-compose.server.yml ps
+
+  # --------------------------------------------------------------------------
+  # Этап 5: негативные проверки защиты на живом сервере
+  # --------------------------------------------------------------------------
+  security-smoke:
+    name: Security smoke test
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check protection on live server
+        run: bash scripts/security-smoke.sh https://zhemchugovei.duckdns.org

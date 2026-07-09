@@ -194,9 +194,15 @@ curl -X POST https://zhemchugovei.duckdns.org/messages \
 
 1. **lint** — gofmt и golangci-lint.
 2. **unit tests** — `go test -race -cover` (блокирующий этап перед упаковкой).
-3. **build-and-push** — собирает Docker-образ и пушит в Docker Hub
-   (только после успешных lint и unit-тестов).
-4. **deploy** — заходит на сервер по SSH, `docker compose pull` и `up -d`.
+3. **security** — gitleaks (поиск секретов в истории), govulncheck и trivy
+   (уязвимости зависимостей), валидация конфигов nginx / Keycloak /
+   oauth2-proxy / Alertmanager на тестовых значениях (`scripts/check-configs.sh`).
+4. **build-and-push** — собирает Docker-образ и пушит в Docker Hub
+   (только после успешных lint, unit-тестов и security).
+5. **deploy** — заходит на сервер по SSH, `docker compose pull` и `up -d`.
+6. **security smoke** — после деплоя негативные проверки на живом сервере
+   (`scripts/security-smoke.sh`): интерфейсы наблюдаемости без сессии Keycloak
+   закрыты, `POST /messages` без токена — 401, HTTP уводится на HTTPS.
 
 Отдельные треки:
 

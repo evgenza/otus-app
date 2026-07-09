@@ -2,6 +2,8 @@ module github.com/evgenza/otus-app
 
 go 1.26
 
+toolchain go1.26.5
+
 require (
 	github.com/exaring/otelpgx v0.11.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
