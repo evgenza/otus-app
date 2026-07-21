@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
 
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/evgenza/otus-app/internal/grpcserver"
 	"github.com/evgenza/otus-app/internal/handlers"
 	"github.com/evgenza/otus-app/internal/httpserver"
 	"github.com/evgenza/otus-app/internal/observability"
@@ -52,14 +57,36 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	auth := security.NewAuth()
+
+	grpcPort := os.Getenv("GRPC_PORT")
+	if grpcPort == "" {
+		grpcPort = "9091"
+	}
+	creds := insecure.NewCredentials()
+	if tlsCfg != nil {
+		creds = credentials.NewTLS(tlsCfg.Clone())
+	}
+	gsrv := grpcserver.New(store, auth, creds)
+	lis, err := net.Listen("tcp", ":"+grpcPort)
+	if err != nil {
+		return err
+	}
+	go func() {
+		if err := gsrv.Serve(lis); err != nil {
+			slog.Error("gRPC-сервер остановился с ошибкой", "err", err)
+		}
+	}()
+	defer gsrv.GracefulStop()
 
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           handlers.New(store, security.NewAuth()),
+		Handler:           handlers.New(store, auth),
 		ReadHeaderTimeout: 5 * time.Second,
 		TLSConfig:         tlsCfg,
 	}
 
-	slog.Info("сервис запущен", "version", version.Version, "port", port, "mtls", tlsCfg != nil)
+	slog.Info("сервис запущен",
+		"version", version.Version, "port", port, "grpc_port", grpcPort, "mtls", tlsCfg != nil)
 	return httpserver.Run(srv)
 }

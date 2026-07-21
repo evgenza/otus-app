@@ -1,0 +1,282 @@
+openapi: 3.0.3
+info:
+  title: otus-app API
+  description: |
+    HTTP-сервис на Go с хранением сообщений в PostgreSQL.
+
+    Прямые маршруты (`/messages`, `/hello`, ...) обслуживает app,
+    маршруты `/gw/...` — gateway: обычное проксирование по HTTP+JSON
+    и мост в gRPC (`/gw/grpc/...`) с разными видами стриминга.
+
+    `POST /messages` и `POST /gw/grpc/...` требуют JWT из Keycloak —
+    нажмите Authorize и вставьте access_token.
+  version: "1.0"
+servers:
+  - url: /
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access-токен из Keycloak (realm otus, клиент otus-app)
+  schemas:
+    Message:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 42
+        text:
+          type: string
+          example: привет
+        checksum:
+          type: string
+          description: SHA-256 текста, вычисляется при сохранении
+        checksum_ok:
+          type: boolean
+          description: Сходится ли контрольная сумма при чтении
+        created_at:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: требуется токен авторизации
+paths:
+  /health:
+    get:
+      summary: Проверка живости сервиса
+      tags: [app]
+      responses:
+        "200":
+          description: Сервис работает
+          content:
+            application/json:
+              example: { "status": "работает" }
+  /version:
+    get:
+      summary: Версия и дата сборки
+      tags: [app]
+      responses:
+        "200":
+          description: Информация о сборке
+          content:
+            application/json:
+              example: { "version": "v1.0.0", "date": "2026-07-21T10:00:00Z" }
+  /hello:
+    get:
+      summary: Приветствие
+      tags: [app]
+      parameters:
+        - name: name
+          in: query
+          required: false
+          schema:
+            type: string
+          example: Женя
+      responses:
+        "200":
+          description: Приветствие
+          content:
+            application/json:
+              example: { "message": "Привет, Женя!" }
+  /status:
+    get:
+      summary: Статусная страница сервиса (HTML)
+      description: Отрисовывается шаблонизатором html/template, обновляется каждые 10 секунд
+      tags: [app]
+      responses:
+        "200":
+          description: HTML-страница с состоянием сервиса
+          content:
+            text/html: {}
+  /messages:
+    get:
+      summary: Список последних сообщений
+      tags: [app]
+      responses:
+        "200":
+          description: До 100 последних сообщений
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+    post:
+      summary: Создать сообщение (закрытый раздел)
+      description: Доступ контролирует middleware — нужен JWT из Keycloak
+      tags: [app]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+                  example: сообщение через swagger
+      responses:
+        "201":
+          description: Сообщение сохранено
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400":
+          description: Некорректное тело запроса
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Нет или недействительный токен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /gw/messages:
+    get:
+      summary: Список сообщений через gateway (HTTP+JSON)
+      tags: [gateway]
+      responses:
+        "200":
+          description: Проксированный ответ app
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+    post:
+      summary: Создать сообщение через gateway (HTTP+JSON)
+      tags: [gateway]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+                  example: через gateway
+      responses:
+        "201":
+          description: Сообщение сохранено
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "401":
+          description: Нет или недействительный токен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /gw/grpc/messages:
+    get:
+      summary: Список сообщений через gRPC server streaming
+      description: Gateway читает поток сообщений из app по gRPC и отдаёт их построчно (NDJSON)
+      tags: [gateway-grpc]
+      responses:
+        "200":
+          description: Поток сообщений, по одному JSON-объекту на строку
+          content:
+            application/x-ndjson: {}
+    post:
+      summary: Создать сообщение через gRPC unary-вызов
+      tags: [gateway-grpc]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+                  example: через grpc
+      responses:
+        "201":
+          description: Сообщение сохранено
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "401":
+          description: Нет или недействительный токен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /gw/grpc/messages/batch:
+    post:
+      summary: Пакетное создание через gRPC client streaming
+      description: Gateway отправляет каждый текст отдельным сообщением в клиентский поток, app отвечает одной сводкой
+      tags: [gateway-grpc]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [texts]
+              properties:
+                texts:
+                  type: array
+                  items:
+                    type: string
+                  example: [первое, второе, третье]
+      responses:
+        "201":
+          description: Сводка по созданным сообщениям
+          content:
+            application/json:
+              example: { "created": 3, "ids": [101, 102, 103] }
+        "401":
+          description: Нет или недействительный токен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /gw/grpc/chat:
+    post:
+      summary: Эхо-чат через gRPC bidirectional streaming
+      description: Каждая реплика уходит в двунаправленный поток, ответы собираются в том же порядке
+      tags: [gateway-grpc]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [notes]
+              properties:
+                notes:
+                  type: array
+                  items:
+                    type: string
+                  example: [привет, как дела]
+      responses:
+        "200":
+          description: Ответы сервера
+          content:
+            application/json:
+              example: { "replies": ["эхо: привет", "эхо: как дела"] }

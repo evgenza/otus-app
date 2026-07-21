@@ -48,20 +48,24 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 			writeAuthError(w, "требуется токен авторизации")
 			return
 		}
-
-		opts := []jwt.ParserOption{
-			jwt.WithValidMethods([]string{"RS256"}),
-			jwt.WithExpirationRequired(),
-		}
-		if a.issuer != "" {
-			opts = append(opts, jwt.WithIssuer(a.issuer))
-		}
-		if _, err := jwt.Parse(raw, a.keyFor, opts...); err != nil {
+		if err := a.Validate(raw); err != nil {
 			writeAuthError(w, "недействительный токен")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (a *Auth) Validate(raw string) error {
+	opts := []jwt.ParserOption{
+		jwt.WithValidMethods([]string{"RS256"}),
+		jwt.WithExpirationRequired(),
+	}
+	if a.issuer != "" {
+		opts = append(opts, jwt.WithIssuer(a.issuer))
+	}
+	_, err := jwt.Parse(raw, a.keyFor, opts...)
+	return err
 }
 
 func (a *Auth) keyFor(token *jwt.Token) (any, error) {

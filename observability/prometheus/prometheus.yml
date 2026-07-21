@@ -24,6 +24,10 @@ scrape_configs:
     static_configs:
       - targets: ["gateway:8090"]
 
+  - job_name: chaosproxy
+    static_configs:
+      - targets: ["chaosproxy:8091"]
+
   - job_name: postgres
     static_configs:
       - targets: ["postgres-exporter:9187"]
