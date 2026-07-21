@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package otus.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/evgenza/otus-app/internal/grpcapi";
+
+service MessageService {
+  rpc CreateMessage(CreateMessageRequest) returns (Message);
+  rpc ListMessages(ListMessagesRequest) returns (stream Message);
+  rpc BatchCreate(stream CreateMessageRequest) returns (BatchCreateSummary);
+  rpc Chat(stream ChatNote) returns (stream ChatNote);
+}
+
+message CreateMessageRequest {
+  string text = 1;
+}
+
+message ListMessagesRequest {
+  int32 limit = 1;
+}
+
+message Message {
+  int64 id = 1;
+  string text = 2;
+  string checksum = 3;
+  bool checksum_ok = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message BatchCreateSummary {
+  int32 created = 1;
+  repeated int64 ids = 2;
+}
+
+message ChatNote {
+  string text = 1;
+}

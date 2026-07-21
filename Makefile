@@ -43,6 +43,17 @@ test-integration: ## Интеграционные тесты (нужен Postgre
 loadtest: ## Нагрузочный тест k6 (BASE_URL задаёт цель)
 	docker run --rm -e BASE_URL="$(BASE_URL)" -v "$(PWD)/loadtest:/loadtest" grafana/k6 run /loadtest/script.js
 
+.PHONY: bench
+bench: ## Сравнение производительности HTTP+JSON и gRPC
+	go test -run '^$$' -bench . -benchtime 2s ./internal/grpcserver/
+
+.PHONY: proto
+proto: ## Перегенерировать gRPC-код из api/proto (нужны protoc и плагины)
+	protoc --proto_path=api/proto \
+		--go_out=internal/grpcapi --go_opt=paths=source_relative \
+		--go-grpc_out=internal/grpcapi --go-grpc_opt=paths=source_relative \
+		messages.proto
+
 .PHONY: build
 build: ## Собрать бинарь
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o bin/$(APP_NAME) ./cmd/app

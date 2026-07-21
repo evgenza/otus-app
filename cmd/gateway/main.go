@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/evgenza/otus-app/internal/grpcapi"
 	"github.com/evgenza/otus-app/internal/httpserver"
 	"github.com/evgenza/otus-app/internal/observability"
 	"github.com/evgenza/otus-app/internal/security"
@@ -36,6 +37,10 @@ func run() error {
 	if appURL == "" {
 		appURL = "http://app:8080"
 	}
+	appGRPCAddr := os.Getenv("APP_GRPC_ADDR")
+	if appGRPCAddr == "" {
+		appGRPCAddr = "app:9091"
+	}
 
 	ctx := context.Background()
 	shutdownTracing, err := observability.SetupTracing(ctx, "otus-gateway")
@@ -53,12 +58,18 @@ func run() error {
 		transport = &http.Transport{TLSClientConfig: clientTLS}
 	}
 
+	grpcClient, err := newGRPCClient(appGRPCAddr)
+	if err != nil {
+		return err
+	}
+
 	g := &gateway{
 		appURL: appURL,
 		client: &http.Client{
 			Transport: otelhttp.NewTransport(transport),
 			Timeout:   10 * time.Second,
 		},
+		grpc: grpcClient,
 	}
 
 	srv := &http.Server{
@@ -67,13 +78,14 @@ func run() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	slog.Info("gateway запущен", "port", port, "app_url", appURL)
+	slog.Info("gateway запущен", "port", port, "app_url", appURL, "app_grpc", appGRPCAddr)
 	return httpserver.Run(srv)
 }
 
 type gateway struct {
 	appURL string
 	client *http.Client
+	grpc   grpcapi.MessageServiceClient
 }
 
 func (g *gateway) routes() http.Handler {
@@ -82,6 +94,10 @@ func (g *gateway) routes() http.Handler {
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("POST /gw/messages", g.proxyCreate)
 	mux.HandleFunc("GET /gw/messages", g.proxyList)
+	mux.HandleFunc("POST /gw/grpc/messages", g.grpcCreate)
+	mux.HandleFunc("GET /gw/grpc/messages", g.grpcList)
+	mux.HandleFunc("POST /gw/grpc/messages/batch", g.grpcBatch)
+	mux.HandleFunc("POST /gw/grpc/chat", g.grpcChat)
 	return mux
 }
 

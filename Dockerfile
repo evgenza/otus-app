@@ -16,7 +16,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
       -X github.com/evgenza/otus-app/internal/version.Version=${VERSION} \
       -X github.com/evgenza/otus-app/internal/version.Date=${DATE}" \
     -o /out/app ./cmd/app \
-    && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/gateway ./cmd/gateway
+    && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/gateway ./cmd/gateway \
+    && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/chaosproxy ./cmd/chaosproxy
 
 FROM alpine:3.20
 
@@ -26,6 +27,7 @@ RUN apk add --no-cache curl ca-certificates \
 WORKDIR /app
 COPY --from=builder /out/app /app/app
 COPY --from=builder /out/gateway /app/gateway
+COPY --from=builder /out/chaosproxy /app/chaosproxy
 
 USER app
 EXPOSE 8080

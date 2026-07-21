@@ -14,11 +14,25 @@ HTTP-сервер на порту 8080:
 - `GET /health` — `{"status":"работает"}`, нужен для health-check.
 - `GET /version` — версия и дата сборки.
 - `GET /hello` — `{"message":"Привет, мир!"}`, можно передать `?name=...`.
+- `GET /status` — статусная страница на `html/template`: версия, аптайм,
+  состояние БД и контрольных сумм.
+- `GET /swagger/` — Swagger UI, спецификация OpenAPI вшита в бинарь.
 - `POST /messages` — принимает `{"text":"..."}`, сохраняет сообщение в БД,
   возвращает созданную запись с `id`, `created_at` и контрольной суммой текста.
   Требует JWT из Keycloak (заголовок `Authorization: Bearer ...`).
 - `GET /messages` — список последних сообщений из БД, у каждого — результат
   проверки контрольной суммы (`checksum_ok`).
+
+gRPC-сервер на порту 9091 (контракт — `api/proto/messages.proto`): unary
+`CreateMessage`, server streaming `ListMessages`, client streaming
+`BatchCreate`, bidirectional `Chat`. Создание закрыто тем же JWT, что и HTTP
+(токен в метаданных `authorization`). Gateway выводит gRPC наружу мостом:
+`POST /gw/grpc/messages`, `GET /gw/grpc/messages` (NDJSON-стрим),
+`POST /gw/grpc/messages/batch`, `POST /gw/grpc/chat`.
+
+Между gateway и app стоит chaos-прокси (`cmd/chaosproxy`): считает трафик в
+обе стороны метриками Prometheus и по командам на управляющий порт вносит
+помехи — задержку, повтор запросов, обрывы, снижение скорости.
 
 Версия и дата зашиваются в бинарь при компиляции через `-ldflags`
 (пакет `internal/version`).
@@ -26,9 +40,14 @@ HTTP-сервер на порту 8080:
 ## Структура
 
 ```
-cmd/app/main.go                       точка входа app: HTTP-сервер + graceful shutdown
-cmd/gateway/main.go                   второй сервис: проксирует запросы в app
-internal/handlers/                    роуты, обработчики и юнит-тесты
+cmd/app/main.go                       точка входа app: HTTP + gRPC + graceful shutdown
+cmd/gateway/main.go                   второй сервис: HTTP-прокси и gRPC-мост в app
+cmd/chaosproxy/main.go                прокси с метриками трафика и управляемыми помехами
+api/proto/messages.proto              gRPC-контракт (4 вида взаимодействия)
+internal/grpcapi/                     сгенерированный protoc-ом код
+internal/grpcserver/                  gRPC-сервер, интерцепторы авторизации, бенчмарки
+internal/handlers/                    роуты, обработчики, статусная страница и юнит-тесты
+internal/handlers/apidocs/            спецификация OpenAPI и Swagger UI
 internal/httpserver/                  запуск HTTP-сервера с graceful shutdown
 internal/security/                    mTLS, проверка JWT, контрольные суммы
 internal/storage/                     работа с PostgreSQL + интеграционные тесты
@@ -49,6 +68,7 @@ docs/REPORT.md                        отчёт по сборке/деплою
 docs/TEST-REPORT.md                   протокол тестирования
 docs/OBSERVABILITY.md                 протокол проверки наблюдаемости
 docs/SECURITY.md                      протокол проверки защиты (TLS, JWT, хеширование)
+docs/INTERACTION.md                   протокол проверки взаимодействия (Swagger, gRPC, прокси)
 ```
 
 ## Требования
@@ -115,6 +135,12 @@ docker run -d --name pg -e POSTGRES_USER=otus -e POSTGRES_PASSWORD=otus \
   -e POSTGRES_DB=otus -p 5432:5432 postgres:16-alpine
 DATABASE_URL='postgres://otus:otus@localhost:5432/otus?sslmode=disable' \
   go test -tags=integration -race ./...
+```
+
+**Сравнение HTTP+JSON и gRPC** (бенчмарки одинаковых операций):
+
+```bash
+make bench
 ```
 
 **Нагрузочное тестирование** (k6) против развёрнутого сервиса:
@@ -224,7 +250,7 @@ curl -X POST https://zhemchugovei.duckdns.org/messages \
 Alertmanager и realm Keycloak (секреты подставляются через `envsubst`), копирует
 каталог `observability/` на сервер, генерирует внутренний CA и сертификаты mTLS,
 при первом деплое выпускает сертификат Let's Encrypt, и поднимает стек
-(`docker-compose.server.yml`: nginx, app, gateway, Keycloak, БД, Prometheus,
+(`docker-compose.server.yml`: nginx, app, gateway, chaos-прокси, Keycloak, БД, Prometheus,
 Grafana, Alertmanager, Jaeger, ELK, certbot). Чтобы всё влезло в 4Gi памяти,
 тяжёлым контейнерам заданы `mem_limit` и ужаты heap-ы (Elasticsearch и
 Keycloak — по 256m).
@@ -232,7 +258,10 @@ Keycloak — по 256m).
 Наружу открыты только 80/443, всё ходит через nginx:
 
 - <https://zhemchugovei.duckdns.org/> — API app (`/hello`, `/messages`, ...)
-- <https://zhemchugovei.duckdns.org/gw/messages> — gateway
+- <https://zhemchugovei.duckdns.org/swagger/> — Swagger UI
+- <https://zhemchugovei.duckdns.org/status> — статусная страница
+- <https://zhemchugovei.duckdns.org/gw/messages> — gateway (HTTP+JSON через
+  chaos-прокси), <https://zhemchugovei.duckdns.org/gw/grpc/messages> — gRPC-мост
 - <https://zhemchugovei.duckdns.org/auth/> — Keycloak
 - <https://zhemchugovei.duckdns.org/grafana/> — Grafana (вход через Keycloak)
 - <https://zhemchugovei.duckdns.org/prometheus/>, `/alertmanager/`, `/jaeger/`,

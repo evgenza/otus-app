@@ -150,3 +150,54 @@ func TestListMessagesStoreError(t *testing.T) {
 		t.Fatalf("ожидался статус 500, получен %d", rec.Code)
 	}
 }
+
+func TestStatusPage(t *testing.T) {
+	store := &fakeStore{}
+	_, _ = store.Create(context.Background(), "первое")
+	rec := do(t, store, http.MethodGet, "/status", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ожидался статус 200, получен %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("ожидался text/html, получен %q", ct)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"Состояние сервиса", "доступна", "все сходятся"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("на странице нет фрагмента %q", want)
+		}
+	}
+}
+
+func TestStatusPageDBError(t *testing.T) {
+	rec := do(t, &fakeStore{failAll: true}, http.MethodGet, "/status", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ожидался статус 200, получен %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "недоступна") {
+		t.Fatal("страница не показывает недоступность базы")
+	}
+}
+
+func TestSwaggerUI(t *testing.T) {
+	rec := do(t, &fakeStore{}, http.MethodGet, "/swagger/", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ожидался статус 200, получен %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "swagger-ui") {
+		t.Fatal("в ответе нет страницы Swagger UI")
+	}
+}
+
+func TestSwaggerSpec(t *testing.T) {
+	rec := do(t, &fakeStore{}, http.MethodGet, "/swagger/openapi.yaml", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ожидался статус 200, получен %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"openapi: 3.0", "/messages", "bearerAuth"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("в спецификации нет фрагмента %q", want)
+		}
+	}
+}

@@ -21,6 +21,7 @@ services:
     entrypoint: ["/app/app"]
     environment:
       PORT: "8080"
+      GRPC_PORT: "9091"
       DATABASE_URL: postgres://otus:otus@db:5432/otus?sslmode=disable
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
@@ -45,12 +46,38 @@ services:
       retries: 3
       start_period: 5s
 
+  chaosproxy:
+    image: evgenza/otus-app:obs
+    entrypoint: ["/app/chaosproxy"]
+    environment:
+      PORT: "8080"
+      CONTROL_PORT: "8091"
+      APP_URL: https://app:8080
+      TLS_CERT_FILE: /certs/chaosproxy.crt
+      TLS_KEY_FILE: /certs/chaosproxy.key
+      TLS_CA_FILE: /certs/ca.crt
+    volumes:
+      - ./certs/chaosproxy.crt:/certs/chaosproxy.crt:ro
+      - ./certs/chaosproxy.key:/certs/chaosproxy.key:ro
+      - ./certs/ca.crt:/certs/ca.crt:ro
+    depends_on:
+      - app
+    ports:
+      - "8091:8091"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8091/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
   gateway:
     image: evgenza/otus-app:obs
     entrypoint: ["/app/gateway"]
     environment:
       PORT: "8090"
-      APP_URL: https://app:8080
+      APP_URL: https://chaosproxy:8080
+      APP_GRPC_ADDR: app:9091
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
       TLS_CERT_FILE: /certs/gateway.crt
@@ -62,6 +89,7 @@ services:
       - ./certs/ca.crt:/certs/ca.crt:ro
     depends_on:
       - app
+      - chaosproxy
     ports:
       - "8090:8090"
     healthcheck:

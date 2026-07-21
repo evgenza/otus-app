@@ -34,6 +34,7 @@ issue() {
 }
 
 issue app "DNS:app,DNS:otus-app,DNS:localhost,IP:127.0.0.1" "serverAuth,clientAuth"
+issue chaosproxy "DNS:chaosproxy,DNS:localhost,IP:127.0.0.1" "serverAuth,clientAuth"
 issue gateway "" "clientAuth"
 issue nginx "" "clientAuth"
 issue prometheus "" "clientAuth"
