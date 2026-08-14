@@ -12,12 +12,16 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/evgenza/otus-app/internal/audit"
+	"github.com/evgenza/otus-app/internal/coord"
 	"github.com/evgenza/otus-app/internal/grpcserver"
 	"github.com/evgenza/otus-app/internal/handlers"
 	"github.com/evgenza/otus-app/internal/httpserver"
 	"github.com/evgenza/otus-app/internal/observability"
+	"github.com/evgenza/otus-app/internal/ratelimit"
 	"github.com/evgenza/otus-app/internal/security"
 	"github.com/evgenza/otus-app/internal/storage"
+	"github.com/evgenza/otus-app/internal/tcache"
 	"github.com/evgenza/otus-app/internal/version"
 )
 
@@ -47,11 +51,42 @@ func run() error {
 	}
 	defer func() { _ = shutdownTracing(context.Background()) }()
 
-	store, err := storage.New(ctx, dsn)
+	coordinator, err := coord.New()
+	if err != nil {
+		return err
+	}
+	defer coordinator.Close()
+
+	var store *storage.Postgres
+	err = coordinator.WithLock(ctx, "/otus/lock/migrate", func() error {
+		var lockErr error
+		store, lockErr = storage.New(ctx, dsn)
+		return lockErr
+	})
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+
+	limiter := ratelimit.New()
+	coordinator.WatchInt(ctx, "/otus/config/rate_limit", limiter.SetLimit)
+
+	auditLog, err := audit.New(ctx)
+	if err != nil {
+		slog.Warn("аудит-лог недоступен, работаю без него", "err", err)
+	}
+	cache, err := tcache.New(ctx)
+	if err != nil {
+		slog.Warn("кэш недоступен, работаю без него", "err", err)
+	}
+
+	apiOpts := []handlers.Option{handlers.WithLimiter(limiter)}
+	if auditLog != nil {
+		apiOpts = append(apiOpts, handlers.WithAudit(auditLog))
+	}
+	if cache != nil {
+		apiOpts = append(apiOpts, handlers.WithCache(cache))
+	}
 
 	tlsCfg, err := security.ServerTLS()
 	if err != nil {
@@ -81,7 +116,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           handlers.New(store, auth),
+		Handler:           handlers.New(store, auth, apiOpts...),
 		ReadHeaderTimeout: 5 * time.Second,
 		TLSConfig:         tlsCfg,
 	}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evgenza/otus-app/internal/audit"
 	"github.com/evgenza/otus-app/internal/handlers/apidocs"
 	"github.com/evgenza/otus-app/internal/security"
 )
@@ -225,6 +226,96 @@ func TestSwaggerUI(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "swagger-ui") {
 		t.Fatal("в ответе нет страницы Swagger UI")
+	}
+}
+
+type fakeAudit struct {
+	entries []audit.Entry
+}
+
+func (f *fakeAudit) Record(_ context.Context, event, text string) {
+	f.entries = append(f.entries, audit.Entry{Event: event, Text: text, At: time.Now()})
+}
+
+func (f *fakeAudit) Last(_ context.Context, _ int64) ([]audit.Entry, error) {
+	return f.entries, nil
+}
+
+type fakeCache struct {
+	data map[string]string
+}
+
+func (f *fakeCache) Get(_ context.Context, key string) (string, bool) {
+	v, ok := f.data[key]
+	return v, ok
+}
+
+func (f *fakeCache) Set(_ context.Context, key, value string) {
+	if f.data == nil {
+		f.data = make(map[string]string)
+	}
+	f.data[key] = value
+}
+
+func (f *fakeCache) Delete(_ context.Context, key string) {
+	delete(f.data, key)
+}
+
+func TestAuditNotConfigured(t *testing.T) {
+	rec := do(t, &fakeStore{}, http.MethodGet, "/audit", "")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("без настройки аудита ожидался статус 503, получен %d", rec.Code)
+	}
+}
+
+func TestAuditRecordsCreations(t *testing.T) {
+	auditLog := &fakeAudit{}
+	handler := New(&fakeStore{}, nil, WithAudit(auditLog))
+
+	req := httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(`{"text":"в аудит"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("ожидался статус 201, получен %d", rec.Code)
+	}
+	if len(auditLog.entries) != 1 || auditLog.entries[0].Text != "в аудит" {
+		t.Fatalf("событие не записано в аудит: %+v", auditLog.entries)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/audit", nil)
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("ожидался статус 200, получен %d", listRec.Code)
+	}
+	if !strings.Contains(listRec.Body.String(), "в аудит") {
+		t.Fatalf("в ответе /audit нет записанного события: %s", listRec.Body.String())
+	}
+}
+
+func TestListMessagesCache(t *testing.T) {
+	store := &fakeStore{}
+	_, _ = store.Create(context.Background(), "кэшируемое", "")
+	cache := &fakeCache{}
+	handler := New(store, nil, WithCache(cache))
+
+	get := func() *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/messages", nil))
+		return rec
+	}
+
+	if rec := get(); rec.Header().Get("X-Cache") != "MISS" {
+		t.Fatalf("первый запрос должен идти мимо кэша, получен %q", rec.Header().Get("X-Cache"))
+	}
+	if rec := get(); rec.Header().Get("X-Cache") != "HIT" {
+		t.Fatalf("второй запрос должен идти из кэша, получен %q", rec.Header().Get("X-Cache"))
+	}
+
+	post := httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(`{"text":"сброс кэша"}`))
+	handler.ServeHTTP(httptest.NewRecorder(), post)
+	if rec := get(); rec.Header().Get("X-Cache") != "MISS" {
+		t.Fatal("после создания сообщения кэш должен сброситься")
 	}
 }
 

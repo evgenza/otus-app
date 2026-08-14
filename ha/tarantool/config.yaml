@@ -1,0 +1,37 @@
+credentials:
+  users:
+    replicator:
+      password: 'replpass'
+      roles: [replication]
+    app:
+      password: 'app-secret'
+      roles: [super]
+
+iproto:
+  advertise:
+    peer:
+      login: replicator
+
+replication:
+  failover: election
+
+groups:
+  storages:
+    replicasets:
+      storage:
+        instances:
+          tarantool-0:
+            iproto:
+              listen:
+                - uri: tarantool-0:3301
+          tarantool-1:
+            iproto:
+              listen:
+                - uri: tarantool-1:3301
+          tarantool-2:
+            iproto:
+              listen:
+                - uri: tarantool-2:3301
+
+app:
+  file: /opt/tarantool/init.lua
