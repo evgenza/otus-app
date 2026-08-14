@@ -36,6 +36,22 @@ gRPC-сервер на порту 9091 (контракт — `api/proto/messages
 обе стороны метриками Prometheus и по командам на управляющий порт вносит
 помехи — задержку, повтор запросов, обрывы, снижение скорости.
 
+Работа с СУБД и кэшированием (все включается переменными окружения, без
+них приложение работает как раньше):
+
+- **Rate Limiter** на Valkey (`VALKEY_ADDRS` — адреса sentinel-ов,
+  `VALKEY_MASTER_NAME`): счетчик в фиксированном окне на минуту, при
+  превышении — 429. Лимит задается `RATE_LIMIT` и меняется на лету через
+  ключ `/otus/config/rate_limit` в etcd.
+- **Распределенный мьютекс** на etcd (`ETCD_ENDPOINTS`): миграция схемы БД
+  выполняется под блокировкой `/otus/lock/migrate`, чтобы реплики
+  приложения не гонялись друг с другом.
+- **Аудит-лог** в MongoDB replica set (`MONGO_URL`): каждое созданное
+  сообщение пишется с write concern majority, последние события — на
+  `GET /audit`.
+- **Кэш** списка сообщений в Tarantool (`TARANTOOL_ADDRS`): TTL 10 секунд,
+  заголовок `X-Cache: HIT/MISS`, создание сообщения сбрасывает кэш.
+
 Версия и дата зашиваются в бинарь при компиляции через `-ldflags`
 (пакет `internal/version`).
 
@@ -71,6 +87,9 @@ docs/TEST-REPORT.md                   протокол тестирования
 docs/OBSERVABILITY.md                 протокол проверки наблюдаемости
 docs/SECURITY.md                      протокол проверки защиты (TLS, JWT, хеширование)
 docs/INTERACTION.md                   протокол проверки взаимодействия (Swagger, gRPC, прокси)
+docs/DATABASES.md                     протокол проверки СУБД и кэширования (HA, отказы, шаблоны)
+ha/docker-compose.ha.yml              отказоустойчивый стенд: Postgres, Mongo, Valkey, Tarantool, etcd
+scripts/ha-failover-test.sh           тесты отказов узлов СУБД под нагрузкой
 ```
 
 ## Требования
@@ -144,6 +163,19 @@ DATABASE_URL='postgres://otus:otus@localhost:5432/otus?sslmode=disable' \
 ```bash
 make bench
 ```
+
+**Отказоустойчивый стенд и тесты отказов** (локально, 18 контейнеров:
+PostgreSQL с repmgr, MongoDB replica set, Valkey с sentinel, Tarantool с
+raft, кластер etcd и приложение, подключенное ко всем сразу):
+
+```bash
+cd ha && docker compose -f docker-compose.ha.yml up -d --build && cd ..
+bash scripts/ha-failover-test.sh
+```
+
+Скрипт держит нагрузку на API, по очереди убивает и возвращает узлы каждой
+СУБД, отдельно проверяет потерю кворума etcd и печатает статистику ошибок.
+Протокол и выводы — в [docs/DATABASES.md](docs/DATABASES.md).
 
 **Нагрузочное тестирование** (k6) против развёрнутого сервиса:
 

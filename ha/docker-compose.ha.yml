@@ -1,0 +1,185 @@
+name: otus-ha
+
+services:
+  etcd-0: &etcd
+    image: quay.io/coreos/etcd:v3.5.16
+    command:
+      - etcd
+      - --name=etcd-0
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-0:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-0:2380
+      - --initial-cluster=etcd-0=http://etcd-0:2380,etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=otus-ha
+
+  etcd-1:
+    <<: *etcd
+    command:
+      - etcd
+      - --name=etcd-1
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-1:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-1:2380
+      - --initial-cluster=etcd-0=http://etcd-0:2380,etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=otus-ha
+
+  etcd-2:
+    <<: *etcd
+    command:
+      - etcd
+      - --name=etcd-2
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-2:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-2:2380
+      - --initial-cluster=etcd-0=http://etcd-0:2380,etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=otus-ha
+
+  pg-0:
+    image: bitnamilegacy/postgresql-repmgr:16
+    environment: &pg-env
+      POSTGRESQL_POSTGRES_PASSWORD: adminpass
+      POSTGRESQL_USERNAME: otus
+      POSTGRESQL_PASSWORD: otuspass
+      POSTGRESQL_DATABASE: otus
+      REPMGR_PASSWORD: repmgrpass
+      REPMGR_PRIMARY_HOST: pg-0
+      REPMGR_PARTNER_NODES: pg-0,pg-1
+      REPMGR_NODE_NAME: pg-0
+      REPMGR_NODE_NETWORK_NAME: pg-0
+    healthcheck: &pg-health
+      test: ["CMD-SHELL", "pg_isready -U otus -d otus"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  pg-1:
+    image: bitnamilegacy/postgresql-repmgr:16
+    environment:
+      <<: *pg-env
+      REPMGR_NODE_NAME: pg-1
+      REPMGR_NODE_NETWORK_NAME: pg-1
+    healthcheck: *pg-health
+    depends_on:
+      - pg-0
+
+  mongo-0: &mongo
+    image: mongo:7.0
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+
+  mongo-1: *mongo
+
+  mongo-2: *mongo
+
+  mongo-init:
+    image: mongo:7.0
+    restart: "no"
+    depends_on:
+      - mongo-0
+      - mongo-1
+      - mongo-2
+    entrypoint:
+      - bash
+      - -c
+      - |
+        for i in $(seq 1 30); do
+          mongosh --host mongo-0 --quiet --eval 'db.runCommand({ping:1})' >/dev/null 2>&1 && break
+          sleep 2
+        done
+        mongosh --host mongo-0 --quiet --eval '
+          try { rs.status() } catch (e) {
+            rs.initiate({_id: "rs0", members: [
+              {_id: 0, host: "mongo-0:27017"},
+              {_id: 1, host: "mongo-1:27017"},
+              {_id: 2, host: "mongo-2:27017"}
+            ]})
+          }'
+
+  valkey-0:
+    image: valkey/valkey:8.0
+    command: ["valkey-server", "--replica-announce-ip", "valkey-0"]
+
+  valkey-1:
+    image: valkey/valkey:8.0
+    command: ["valkey-server", "--replicaof", "valkey-0", "6379", "--replica-announce-ip", "valkey-1"]
+    depends_on:
+      - valkey-0
+
+  valkey-2:
+    image: valkey/valkey:8.0
+    command: ["valkey-server", "--replicaof", "valkey-0", "6379", "--replica-announce-ip", "valkey-2"]
+    depends_on:
+      - valkey-0
+
+  sentinel-0: &sentinel
+    image: valkey/valkey:8.0
+    command:
+      - sh
+      - -c
+      - cp /conf/sentinel.conf /tmp/sentinel.conf && exec valkey-sentinel /tmp/sentinel.conf
+    volumes:
+      - ./valkey/sentinel.conf:/conf/sentinel.conf:ro
+    depends_on:
+      - valkey-0
+      - valkey-1
+      - valkey-2
+
+  sentinel-1: *sentinel
+
+  sentinel-2: *sentinel
+
+  tarantool-0: &tarantool
+    image: tarantool/tarantool:3.2
+    command: ["tarantool", "--name", "tarantool-0", "--config", "/opt/tarantool/config.yaml"]
+    volumes:
+      - ./tarantool/config.yaml:/opt/tarantool/config.yaml:ro
+      - ./tarantool/init.lua:/opt/tarantool/init.lua:ro
+
+  tarantool-1:
+    <<: *tarantool
+    command: ["tarantool", "--name", "tarantool-1", "--config", "/opt/tarantool/config.yaml"]
+
+  tarantool-2:
+    <<: *tarantool
+    command: ["tarantool", "--name", "tarantool-2", "--config", "/opt/tarantool/config.yaml"]
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: evgenza/otus-app:ha
+    entrypoint: ["/app/app"]
+    environment:
+      PORT: "8080"
+      GRPC_PORT: "9091"
+      DATABASE_URL: postgres://otus:otuspass@pg-0:5432,pg-1:5432/otus?target_session_attrs=read-write
+      MONGO_URL: mongodb://mongo-0:27017,mongo-1:27017,mongo-2:27017/otus?replicaSet=rs0
+      VALKEY_ADDRS: sentinel-0:26379,sentinel-1:26379,sentinel-2:26379
+      VALKEY_MASTER_NAME: mymaster
+      ETCD_ENDPOINTS: http://etcd-0:2379,http://etcd-1:2379,http://etcd-2:2379
+      TARANTOOL_ADDRS: tarantool-0:3301,tarantool-1:3301,tarantool-2:3301
+      RATE_LIMIT: "100"
+    ports:
+      - "8080:8080"
+    depends_on:
+      pg-0:
+        condition: service_healthy
+      pg-1:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+      sentinel-0:
+        condition: service_started
+      tarantool-0:
+        condition: service_started
+      etcd-0:
+        condition: service_started
+    restart: unless-stopped

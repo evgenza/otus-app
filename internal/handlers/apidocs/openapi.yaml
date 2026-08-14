@@ -94,6 +94,24 @@ paths:
           description: HTML-страница с состоянием сервиса
           content:
             text/html: {}
+  /audit:
+    get:
+      summary: Аудит-лог созданных сообщений
+      description: Последние события из MongoDB (replica set); 503, если аудит-лог не настроен
+      tags: [app]
+      responses:
+        "200":
+          description: Последние 10 событий
+          content:
+            application/json:
+              example:
+                - { "event": "создано сообщение", "text": "привет", "at": "2026-08-14T10:00:00Z" }
+        "503":
+          description: Аудит-лог не настроен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /messages:
     get:
       summary: Список последних сообщений
