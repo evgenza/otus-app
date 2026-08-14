@@ -8,12 +8,11 @@ middleware, Swagger, расширенное интеграционное тес�
 ## Схема взаимодействия
 
 ```
-клиент ──HTTPS──> nginx ──┬── /            ──mTLS──> app :8080  (REST + Swagger + /status)
-                          │                            app :9091  (gRPC)
-                          └── /gw/         ────────> gateway :8090
-                                                        │
-                                    HTTP+JSON: ──mTLS──> chaosproxy :8080 ──mTLS──> app :8080
-                                    gRPC:      ──mTLS──────────────────────────────> app :9091
+клиент -> nginx (HTTPS)
+  /     -> app :8080 по mTLS         REST, Swagger, /status
+  /gw/  -> gateway :8090
+             HTTP+JSON -> chaosproxy :8080 -> app :8080   (оба плеча mTLS)
+             gRPC      -> app :9091                       (mTLS)
 ```
 
 - **app** — RESTful API + gRPC-сервер (оба порта под mTLS);
@@ -29,6 +28,17 @@ method-паттернами: маршруты объявляются как `GET
 `POST /messages`, метод не тот — роутер сам вернёт 405. Ресурс `messages`
 обслуживается по REST: `POST` создаёт, `GET` читает список, статусы
 201/400/401/500 по смыслу ([internal/handlers/handlers.go](../internal/handlers/handlers.go)).
+
+Создание сообщений идемпотентно. `POST /messages` принимает заголовок
+`Idempotency-Key`: ключ хранится в таблице `messages` под уникальным
+индексом, вставка идёт через `ON CONFLICT (idem_key) DO NOTHING`, поэтому
+повтор запроса с тем же ключом не создаёт дубликат, а возвращает уже
+сохранённое сообщение. Gateway генерирует ключ сам, если клиент его не
+передал, так что путь gateway → chaosproxy → app защищён от повторов
+автоматически - это проверяется вживую режимом `repeat` chaos-прокси
+(раздел 8). Покрытие: юнит-тесты `TestCreateMessageIdempotent` и
+`TestGatewayAddsIdempotencyKey`, интеграционный тест с реальным Postgres
+`TestCreateIdempotent`.
 
 ## 2. Контроль доступа через middleware
 
@@ -65,6 +75,13 @@ Swagger UI отдаётся самим приложением:
 вставить access_token из Keycloak → запросы уходят с заголовком
 `Authorization`. Так из UI корректно тестируются и открытые эндпоинты, и
 закрытые (401 без токена, 201 с токеном).
+
+Спецификация не может разойтись с кодом: маршруты обоих сервисов объявлены
+таблицами (`publicRoutes`), из которых строится и роутер, и список для
+сверки. Автотесты `TestSpecMatchesRoutes` (app) и
+`TestSpecMatchesGatewayRoutes` (gateway) сравнивают этот список с путями из
+`openapi.yaml` в обе стороны: маршрут без описания в спецификации или
+описание без маршрута валят сборку в CI.
 
 ![Swagger UI](screenshots/18-swagger.png)
 
@@ -195,8 +212,8 @@ $ time curl -s -o /dev/null localhost:8090/gw/messages
 real    0m1,008s          # без помехи — ~5 мс
 ```
 
-повтор запросов (write-запрос уходит в app дважды, но данные не дублируются —
-см. раздел про идемпотентность ниже):
+повтор запросов (write-запрос уходит в app дважды, но благодаря
+идемпотентности из раздела 1 данные не дублируются):
 
 ```
 $ curl -X POST localhost:8091/control -d '{"repeat":true}'
@@ -223,28 +240,6 @@ real    0m2,513s          # ответ ~1.2 КБ капает по 500 Б/с
 ```
 
 ![Метрики прокси в Prometheus](screenshots/22-proxy-metrics.png)
-
-## Доработки по замечаниям
-
-**Идемпотентность создания сообщений.** Раньше режим `repeat` chaos-прокси
-приводил к реальным дубликатам в БД. Теперь `POST /messages` принимает
-заголовок `Idempotency-Key`: в таблице `messages` появилась колонка
-`idem_key` с уникальным индексом, вставка идёт через
-`ON CONFLICT (idem_key) DO NOTHING`, и повтор с тем же ключом возвращает уже
-сохранённое сообщение вместо создания нового. Gateway генерирует ключ сам,
-если клиент его не передал, поэтому весь путь gateway → chaosproxy → app
-защищён от повторов автоматически. Покрыто юнит-тестами
-(`TestCreateMessageIdempotent`, `TestGatewayAddsIdempotencyKey`) и
-интеграционным тестом с реальным Postgres (`TestCreateIdempotent`);
-поведение с включённым `repeat` перепроверено вживую — см. вывод выше.
-
-**Контроль соответствия openapi.yaml коду.** Чтобы рукописная спецификация
-не разошлась с реализацией, маршруты обоих сервисов объявлены таблицами
-(`publicRoutes`), из которых строится и роутер, и список для проверки.
-Автотесты `TestSpecMatchesRoutes` (app) и `TestSpecMatchesGatewayRoutes`
-(gateway) сверяют этот список с путями из `openapi.yaml` в обе стороны:
-маршрут без описания в спецификации или описание без маршрута валят сборку
-в CI.
 
 ## Оценка результатов
 
