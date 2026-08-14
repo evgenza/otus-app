@@ -29,14 +29,14 @@ type valkeyCounter struct {
 	client redis.UniversalClient
 }
 
+var hitScript = redis.NewScript(`local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+end
+return count`)
+
 func (v *valkeyCounter) Hit(ctx context.Context, key string, window time.Duration) (int64, error) {
-	pipe := v.client.TxPipeline()
-	incr := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, window)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return 0, err
-	}
-	return incr.Val(), nil
+	return hitScript.Run(ctx, v.client, []string{key}, window.Milliseconds()).Int64()
 }
 
 func New() *Limiter {

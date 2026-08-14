@@ -7,6 +7,9 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 )
 
 type fakeCounter struct {
@@ -79,5 +82,66 @@ func TestNilLimiterPassesThrough(t *testing.T) {
 	var l *Limiter
 	if rec := doRequest(l); rec.Code != http.StatusOK {
 		t.Fatalf("nil-лимитер должен пропускать запросы, получен %d", rec.Code)
+	}
+}
+
+func newValkeyCounter(t *testing.T) (*valkeyCounter, *miniredis.Miniredis) {
+	t.Helper()
+	srv := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	return &valkeyCounter{client: client}, srv
+}
+
+func TestValkeyCounterIncrements(t *testing.T) {
+	counter, _ := newValkeyCounter(t)
+	for want := int64(1); want <= 3; want++ {
+		got, err := counter.Hit(context.Background(), "rl:тест", time.Minute)
+		if err != nil {
+			t.Fatalf("Hit вернул ошибку: %v", err)
+		}
+		if got != want {
+			t.Fatalf("ожидался счетчик %d, получен %d", want, got)
+		}
+	}
+}
+
+func TestValkeyCounterSetsTTLOnce(t *testing.T) {
+	counter, srv := newValkeyCounter(t)
+	ctx := context.Background()
+
+	if _, err := counter.Hit(ctx, "rl:тест", time.Minute); err != nil {
+		t.Fatalf("Hit вернул ошибку: %v", err)
+	}
+	if ttl := srv.TTL("rl:тест"); ttl != time.Minute {
+		t.Fatalf("первый запрос должен выставить TTL окна, получен %v", ttl)
+	}
+
+	srv.FastForward(30 * time.Second)
+	if _, err := counter.Hit(ctx, "rl:тест", time.Minute); err != nil {
+		t.Fatalf("Hit вернул ошибку: %v", err)
+	}
+	if ttl := srv.TTL("rl:тест"); ttl != 30*time.Second {
+		t.Fatalf("повторные запросы не должны продлевать TTL, получен %v", ttl)
+	}
+}
+
+func TestValkeyCounterWindowExpires(t *testing.T) {
+	counter, srv := newValkeyCounter(t)
+	ctx := context.Background()
+
+	_, _ = counter.Hit(ctx, "rl:тест", time.Minute)
+	_, _ = counter.Hit(ctx, "rl:тест", time.Minute)
+	srv.FastForward(61 * time.Second)
+
+	got, err := counter.Hit(ctx, "rl:тест", time.Minute)
+	if err != nil {
+		t.Fatalf("Hit вернул ошибку: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("после истечения окна счетчик должен начаться заново, получен %d", got)
+	}
+	if ttl := srv.TTL("rl:тест"); ttl != time.Minute {
+		t.Fatalf("новое окно должно получить свежий TTL, получен %v", ttl)
 	}
 }
