@@ -2,9 +2,11 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/exaring/otelpgx"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/evgenza/otus-app/internal/handlers"
@@ -54,16 +56,43 @@ func (p *Postgres) migrate(ctx context.Context) error {
 	}
 	_, err = p.pool.Exec(ctx,
 		`UPDATE messages SET text_hash = encode(sha256(convert_to(text, 'UTF8')), 'hex') WHERE text_hash = ''`)
+	if err != nil {
+		return err
+	}
+	_, err = p.pool.Exec(ctx,
+		`ALTER TABLE messages ADD COLUMN IF NOT EXISTS idem_key TEXT`)
+	if err != nil {
+		return err
+	}
+	_, err = p.pool.Exec(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS messages_idem_key_idx ON messages (idem_key)`)
 	return err
 }
 
-func (p *Postgres) Create(ctx context.Context, text string) (handlers.Message, error) {
+func (p *Postgres) Create(ctx context.Context, text, idemKey string) (handlers.Message, error) {
 	var m handlers.Message
+	if idemKey == "" {
+		err := p.pool.QueryRow(ctx,
+			`INSERT INTO messages (text, text_hash) VALUES ($1, $2) RETURNING id, text, text_hash, created_at`,
+			text, security.Checksum(text)).
+			Scan(&m.ID, &m.Text, &m.Checksum, &m.CreatedAt)
+		m.ChecksumOK = true
+		return m, err
+	}
+
 	err := p.pool.QueryRow(ctx,
-		`INSERT INTO messages (text, text_hash) VALUES ($1, $2) RETURNING id, text, text_hash, created_at`,
-		text, security.Checksum(text)).
+		`INSERT INTO messages (text, text_hash, idem_key) VALUES ($1, $2, $3)
+		 ON CONFLICT (idem_key) DO NOTHING
+		 RETURNING id, text, text_hash, created_at`,
+		text, security.Checksum(text), idemKey).
 		Scan(&m.ID, &m.Text, &m.Checksum, &m.CreatedAt)
-	m.ChecksumOK = true
+	if errors.Is(err, pgx.ErrNoRows) {
+		slog.InfoContext(ctx, "повторный запрос с тем же ключом идемпотентности", "idem_key", idemKey)
+		err = p.pool.QueryRow(ctx,
+			`SELECT id, text, text_hash, created_at FROM messages WHERE idem_key = $1`, idemKey).
+			Scan(&m.ID, &m.Text, &m.Checksum, &m.CreatedAt)
+	}
+	m.ChecksumOK = m.Checksum == security.Checksum(m.Text)
 	return m, err
 }
 

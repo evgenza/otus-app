@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,7 +26,7 @@ type Message struct {
 }
 
 type MessageStore interface {
-	Create(ctx context.Context, text string) (Message, error)
+	Create(ctx context.Context, text, idemKey string) (Message, error)
 	List(ctx context.Context) ([]Message, error)
 }
 
@@ -34,20 +35,38 @@ type API struct {
 	authEnabled bool
 }
 
+func (a *API) publicRoutes(auth *security.Auth) map[string]http.Handler {
+	return map[string]http.Handler{
+		"GET /health":    http.HandlerFunc(health),
+		"GET /version":   http.HandlerFunc(versionInfo),
+		"GET /hello":     http.HandlerFunc(hello),
+		"GET /status":    http.HandlerFunc(a.statusPage),
+		"GET /messages":  http.HandlerFunc(a.listMessages),
+		"POST /messages": auth.Middleware(http.HandlerFunc(a.createMessage)),
+	}
+}
+
 func New(store MessageStore, auth *security.Auth) http.Handler {
 	a := &API{store: store, authEnabled: auth != nil}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", health)
-	mux.HandleFunc("GET /version", versionInfo)
-	mux.HandleFunc("GET /hello", hello)
-	mux.HandleFunc("GET /status", a.statusPage)
+	for pattern, handler := range a.publicRoutes(auth) {
+		mux.Handle(pattern, handler)
+	}
 	mux.Handle("GET /swagger/", apidocs.Handler())
 	mux.Handle("GET /swagger", apidocs.Handler())
-	mux.Handle("POST /messages", auth.Middleware(http.HandlerFunc(a.createMessage)))
-	mux.HandleFunc("GET /messages", a.listMessages)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("GET /", hello)
 	return observability.WrapHTTP("otus-app", mux)
+}
+
+func PublicRoutes() []string {
+	a := &API{}
+	routes := make([]string, 0)
+	for pattern := range a.publicRoutes(nil) {
+		routes = append(routes, pattern)
+	}
+	sort.Strings(routes)
+	return routes
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -89,7 +108,7 @@ func (a *API) createMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "поле text обязательно"})
 		return
 	}
-	msg, err := a.store.Create(r.Context(), req.Text)
+	msg, err := a.store.Create(r.Context(), req.Text, r.Header.Get("Idempotency-Key"))
 	if err != nil {
 		slog.ErrorContext(r.Context(), "не удалось сохранить сообщение", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "не удалось сохранить сообщение"})

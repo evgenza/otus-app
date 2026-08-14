@@ -85,7 +85,7 @@ func (s *service) CreateMessage(ctx context.Context, req *grpcapi.CreateMessageR
 	if strings.TrimSpace(req.GetText()) == "" {
 		return nil, status.Error(codes.InvalidArgument, "поле text обязательно")
 	}
-	msg, err := s.store.Create(ctx, req.GetText())
+	msg, err := s.store.Create(ctx, req.GetText(), "")
 	if err != nil {
 		return nil, status.Error(codes.Internal, "не удалось сохранить сообщение")
 	}
@@ -125,7 +125,7 @@ func (s *service) BatchCreate(stream grpc.ClientStreamingServer[grpcapi.CreateMe
 		if strings.TrimSpace(req.GetText()) == "" {
 			return status.Error(codes.InvalidArgument, "поле text обязательно")
 		}
-		msg, err := s.store.Create(stream.Context(), req.GetText())
+		msg, err := s.store.Create(stream.Context(), req.GetText(), "")
 		if err != nil {
 			return status.Error(codes.Internal, "не удалось сохранить сообщение")
 		}

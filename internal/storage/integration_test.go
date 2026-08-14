@@ -52,7 +52,7 @@ func TestStorageCreateAndList(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	created, err := store.Create(ctx, "интеграционное сообщение")
+	created, err := store.Create(ctx, "интеграционное сообщение", "")
 	if err != nil {
 		t.Fatalf("Create вернул ошибку: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestChecksumDetectsTampering(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
 
-	created, err := store.Create(ctx, "неизменное сообщение")
+	created, err := store.Create(ctx, "неизменное сообщение", "")
 	if err != nil {
 		t.Fatalf("Create вернул ошибку: %v", err)
 	}
@@ -110,6 +110,27 @@ func TestChecksumDetectsTampering(t *testing.T) {
 		}
 	}
 	t.Fatal("сообщение не найдено в списке")
+}
+
+func TestCreateIdempotent(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	key := "интеграционный-ключ-" + time.Now().Format("150405.000000")
+
+	first, err := store.Create(ctx, "идемпотентное сообщение", key)
+	if err != nil {
+		t.Fatalf("Create вернул ошибку: %v", err)
+	}
+	second, err := store.Create(ctx, "идемпотентное сообщение", key)
+	if err != nil {
+		t.Fatalf("повторный Create вернул ошибку: %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("повтор с тем же ключом создал новую запись: %d и %d", first.ID, second.ID)
+	}
+	if !second.ChecksumOK {
+		t.Error("контрольная сумма повторно возвращенного сообщения должна сходиться")
+	}
 }
 
 func TestAPIWithDatabase(t *testing.T) {

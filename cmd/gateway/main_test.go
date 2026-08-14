@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/evgenza/otus-app/internal/handlers/apidocs"
 )
 
 func TestGatewayProxiesCreate(t *testing.T) {
@@ -104,5 +106,69 @@ func TestGatewayBackendDown(t *testing.T) {
 	}
 	if e["error"] != "app недоступен" {
 		t.Errorf("неожиданный текст ошибки: %q", e["error"])
+	}
+}
+
+func TestGatewayAddsIdempotencyKey(t *testing.T) {
+	var gotKeys []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKeys = append(gotKeys, r.Header.Get("Idempotency-Key"))
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer backend.Close()
+
+	g := &gateway{appURL: backend.URL, client: backend.Client()}
+	srv := httptest.NewServer(g.routes())
+	defer srv.Close()
+
+	for i := 0; i < 2; i++ {
+		resp, err := http.Post(srv.URL+"/gw/messages", "application/json", strings.NewReader(`{"text":"x"}`))
+		if err != nil {
+			t.Fatalf("запрос к gateway не удался: %v", err)
+		}
+		_ = resp.Body.Close()
+	}
+	if len(gotKeys) != 2 || gotKeys[0] == "" || gotKeys[1] == "" {
+		t.Fatalf("gateway не проставил ключ идемпотентности: %v", gotKeys)
+	}
+	if gotKeys[0] == gotKeys[1] {
+		t.Fatal("разные запросы получили одинаковый ключ идемпотентности")
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/gw/messages", strings.NewReader(`{"text":"y"}`))
+	req.Header.Set("Idempotency-Key", "клиентский-ключ")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("запрос к gateway не удался: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := gotKeys[len(gotKeys)-1]; got != "клиентский-ключ" {
+		t.Fatalf("клиентский ключ идемпотентности потерян, получен %q", got)
+	}
+}
+
+func TestSpecMatchesGatewayRoutes(t *testing.T) {
+	g := &gateway{}
+	registered := make(map[string]bool)
+	for pattern := range g.publicRoutes() {
+		registered[pattern] = true
+	}
+
+	spec := make(map[string]bool)
+	for _, route := range apidocs.SpecRoutes() {
+		if strings.Contains(route, " /gw/") {
+			spec[route] = true
+		}
+	}
+
+	for route := range registered {
+		if !spec[route] {
+			t.Errorf("маршрут %q зарегистрирован в gateway, но отсутствует в openapi.yaml", route)
+		}
+	}
+	for route := range spec {
+		if !registered[route] {
+			t.Errorf("маршрут %q описан в openapi.yaml, но не зарегистрирован в gateway", route)
+		}
 	}
 }

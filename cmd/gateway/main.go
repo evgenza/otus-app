@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,16 +91,24 @@ type gateway struct {
 	grpc   grpcapi.MessageServiceClient
 }
 
+func (g *gateway) publicRoutes() map[string]http.HandlerFunc {
+	return map[string]http.HandlerFunc{
+		"POST /gw/messages":            g.proxyCreate,
+		"GET /gw/messages":             g.proxyList,
+		"POST /gw/grpc/messages":       g.grpcCreate,
+		"GET /gw/grpc/messages":        g.grpcList,
+		"POST /gw/grpc/messages/batch": g.grpcBatch,
+		"POST /gw/grpc/chat":           g.grpcChat,
+	}
+}
+
 func (g *gateway) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", health)
 	mux.Handle("GET /metrics", promhttp.Handler())
-	mux.HandleFunc("POST /gw/messages", g.proxyCreate)
-	mux.HandleFunc("GET /gw/messages", g.proxyList)
-	mux.HandleFunc("POST /gw/grpc/messages", g.grpcCreate)
-	mux.HandleFunc("GET /gw/grpc/messages", g.grpcList)
-	mux.HandleFunc("POST /gw/grpc/messages/batch", g.grpcBatch)
-	mux.HandleFunc("POST /gw/grpc/chat", g.grpcChat)
+	for pattern, handler := range g.publicRoutes() {
+		mux.HandleFunc(pattern, handler)
+	}
 	return mux
 }
 
@@ -121,6 +132,9 @@ func (g *gateway) forward(w http.ResponseWriter, r *http.Request, method string,
 		return
 	}
 	copyHeaders(req.Header, r.Header)
+	if method == http.MethodPost && req.Header.Get("Idempotency-Key") == "" {
+		req.Header.Set("Idempotency-Key", newIdemKey())
+	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		if prior := r.Header.Get("X-Forwarded-For"); prior != "" {
 			host = prior + ", " + host
@@ -170,6 +184,14 @@ func isHopHeader(name string) bool {
 		}
 	}
 	return false
+}
+
+func newIdemKey() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(buf)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

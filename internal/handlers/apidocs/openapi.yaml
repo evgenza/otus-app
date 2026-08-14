@@ -109,10 +109,21 @@ paths:
                   $ref: "#/components/schemas/Message"
     post:
       summary: Создать сообщение (закрытый раздел)
-      description: Доступ контролирует middleware — нужен JWT из Keycloak
+      description: |
+        Доступ контролирует middleware — нужен JWT из Keycloak.
+        Повтор запроса с тем же Idempotency-Key не создаёт дубликат,
+        а возвращает уже сохранённое сообщение.
       tags: [app]
       security:
         - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Ключ идемпотентности запроса
+          example: 4f2a9c1e8b7d63a0
       requestBody:
         required: true
         content:
@@ -158,9 +169,19 @@ paths:
                   $ref: "#/components/schemas/Message"
     post:
       summary: Создать сообщение через gateway (HTTP+JSON)
+      description: |
+        Если клиент не передал Idempotency-Key, gateway генерирует его сам,
+        поэтому повторы запроса на пути gateway → app не создают дубликатов.
       tags: [gateway]
       security:
         - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Ключ идемпотентности (по умолчанию генерирует gateway)
       requestBody:
         required: true
         content:

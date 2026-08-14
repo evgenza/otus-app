@@ -34,7 +34,7 @@ type fakeStore struct {
 	failAll bool
 }
 
-func (f *fakeStore) Create(_ context.Context, text string) (handlers.Message, error) {
+func (f *fakeStore) Create(_ context.Context, text, _ string) (handlers.Message, error) {
 	if f.failAll {
 		return handlers.Message{}, errors.New("сбой хранилища")
 	}
@@ -104,7 +104,7 @@ func TestCreateMessageEmptyText(t *testing.T) {
 func TestListMessagesServerStream(t *testing.T) {
 	store := &fakeStore{}
 	for _, text := range []string{"первое", "второе", "третье"} {
-		_, _ = store.Create(context.Background(), text)
+		_, _ = store.Create(context.Background(), text, "")
 	}
 	client := newClient(t, store, nil)
 
@@ -131,7 +131,7 @@ func TestListMessagesServerStream(t *testing.T) {
 func TestListMessagesLimit(t *testing.T) {
 	store := &fakeStore{}
 	for _, text := range []string{"первое", "второе", "третье"} {
-		_, _ = store.Create(context.Background(), text)
+		_, _ = store.Create(context.Background(), text, "")
 	}
 	client := newClient(t, store, nil)
 
@@ -292,7 +292,7 @@ func TestCreateMessageForgedToken(t *testing.T) {
 func TestListMessagesOpenWithoutToken(t *testing.T) {
 	auth, _ := newTestAuth(t)
 	store := &fakeStore{}
-	_, _ = store.Create(context.Background(), "публичное")
+	_, _ = store.Create(context.Background(), "публичное", "")
 	client := newClient(t, store, auth)
 
 	stream, err := client.ListMessages(context.Background(), &grpcapi.ListMessagesRequest{})

@@ -10,17 +10,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/evgenza/otus-app/internal/handlers/apidocs"
 	"github.com/evgenza/otus-app/internal/security"
 )
 
 type fakeStore struct {
 	items   []Message
+	keys    map[string]Message
 	failAll bool
 }
 
-func (f *fakeStore) Create(_ context.Context, text string) (Message, error) {
+func (f *fakeStore) Create(_ context.Context, text, idemKey string) (Message, error) {
 	if f.failAll {
 		return Message{}, errors.New("сбой хранилища")
+	}
+	if idemKey != "" {
+		if m, ok := f.keys[idemKey]; ok {
+			return m, nil
+		}
 	}
 	m := Message{
 		ID:         int64(len(f.items) + 1),
@@ -30,6 +37,12 @@ func (f *fakeStore) Create(_ context.Context, text string) (Message, error) {
 		CreatedAt:  time.Now(),
 	}
 	f.items = append(f.items, m)
+	if idemKey != "" {
+		if f.keys == nil {
+			f.keys = make(map[string]Message)
+		}
+		f.keys[idemKey] = m
+	}
 	return m, nil
 }
 
@@ -120,6 +133,32 @@ func TestCreateMessage(t *testing.T) {
 	}
 }
 
+func TestCreateMessageIdempotent(t *testing.T) {
+	store := &fakeStore{}
+	handler := New(store, nil)
+	var ids []int64
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/messages", strings.NewReader(`{"text":"один раз"}`))
+		req.Header.Set("Idempotency-Key", "ключ-123")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("ожидался статус 201, получен %d", rec.Code)
+		}
+		var msg Message
+		if err := json.Unmarshal(rec.Body.Bytes(), &msg); err != nil {
+			t.Fatalf("некорректный JSON: %v", err)
+		}
+		ids = append(ids, msg.ID)
+	}
+	if ids[0] != ids[1] {
+		t.Fatalf("повтор с тем же ключом вернул другое сообщение: %d и %d", ids[0], ids[1])
+	}
+	if len(store.items) != 1 {
+		t.Fatalf("ожидалось 1 сообщение в хранилище, получено %d", len(store.items))
+	}
+}
+
 func TestCreateMessageEmptyText(t *testing.T) {
 	rec := do(t, &fakeStore{}, http.MethodPost, "/messages", `{"text":"  "}`)
 	if rec.Code != http.StatusBadRequest {
@@ -129,8 +168,8 @@ func TestCreateMessageEmptyText(t *testing.T) {
 
 func TestListMessages(t *testing.T) {
 	store := &fakeStore{}
-	_, _ = store.Create(context.Background(), "первое")
-	_, _ = store.Create(context.Background(), "второе")
+	_, _ = store.Create(context.Background(), "первое", "")
+	_, _ = store.Create(context.Background(), "второе", "")
 	rec := do(t, store, http.MethodGet, "/messages", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("ожидался статус 200, получен %d", rec.Code)
@@ -153,7 +192,7 @@ func TestListMessagesStoreError(t *testing.T) {
 
 func TestStatusPage(t *testing.T) {
 	store := &fakeStore{}
-	_, _ = store.Create(context.Background(), "первое")
+	_, _ = store.Create(context.Background(), "первое", "")
 	rec := do(t, store, http.MethodGet, "/status", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("ожидался статус 200, получен %d", rec.Code)
@@ -186,6 +225,36 @@ func TestSwaggerUI(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "swagger-ui") {
 		t.Fatal("в ответе нет страницы Swagger UI")
+	}
+}
+
+func TestSpecMatchesRoutes(t *testing.T) {
+	appRoutes := PublicRoutes()
+	specRoutes := make([]string, 0)
+	for _, route := range apidocs.SpecRoutes() {
+		if !strings.Contains(route, " /gw/") {
+			specRoutes = append(specRoutes, route)
+		}
+	}
+
+	spec := make(map[string]bool, len(specRoutes))
+	for _, route := range specRoutes {
+		spec[route] = true
+	}
+	for _, route := range appRoutes {
+		if !spec[route] {
+			t.Errorf("маршрут %q зарегистрирован в приложении, но отсутствует в openapi.yaml", route)
+		}
+	}
+
+	registered := make(map[string]bool, len(appRoutes))
+	for _, route := range appRoutes {
+		registered[route] = true
+	}
+	for _, route := range specRoutes {
+		if !registered[route] {
+			t.Errorf("маршрут %q описан в openapi.yaml, но не зарегистрирован в приложении", route)
+		}
 	}
 }
 

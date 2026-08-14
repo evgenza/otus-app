@@ -80,7 +80,7 @@ func BenchmarkHTTPListMessages(b *testing.B) {
 	quietLogs(b)
 	store := &fakeStore{}
 	for i := 0; i < 100; i++ {
-		_, _ = store.Create(context.Background(), "сообщение для замера списка")
+		_, _ = store.Create(context.Background(), "сообщение для замера списка", "")
 	}
 	srv := httptest.NewServer(handlers.New(store, nil))
 	b.Cleanup(srv.Close)
@@ -103,7 +103,7 @@ func BenchmarkGRPCListMessages(b *testing.B) {
 	quietLogs(b)
 	store := &fakeStore{}
 	for i := 0; i < 100; i++ {
-		_, _ = store.Create(context.Background(), "сообщение для замера списка")
+		_, _ = store.Create(context.Background(), "сообщение для замера списка", "")
 	}
 	client := newBenchGRPCClient(b, store)
 
