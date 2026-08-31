@@ -172,6 +172,333 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /search:
+    get:
+      summary: Поиск по тексту сообщений
+      description: |
+        Один и тот же запрос можно выполнить тремя движками и сравнить:
+        полнотекстовый индекс Elasticsearch (по умолчанию), перебор
+        таблицы в Cassandra и LIKE в PostgreSQL.
+      tags: [storage]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          example: отчет
+        - name: engine
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [elasticsearch, cassandra, postgres]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 10
+      responses:
+        "200":
+          description: Найденные сообщения и время поиска
+          content:
+            application/json:
+              example:
+                engine: elasticsearch
+                query: отчет
+                total: 3
+                took_ms: 4
+                elapsed_ms: 7
+                messages: []
+        "400":
+          description: Не задан запрос или неизвестный движок
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Движок поиска не настроен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /events:
+    get:
+      summary: Лента событий из Cassandra
+      description: Последние события за сутки из партиции message_events
+      tags: [storage]
+      parameters:
+        - name: day
+          in: query
+          required: false
+          schema:
+            type: string
+          example: "2026-08-31"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: События за день
+          content:
+            application/json:
+              example:
+                - { "id": 42, "text": "привет", "checksum": "9f86d0...", "producer": "kafka", "created_at": "2026-08-31T10:00:00Z" }
+        "503":
+          description: Cassandra не настроена
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /events/{id}:
+    get:
+      summary: Событие по идентификатору
+      description: Чтение из денормализованной таблицы events_by_id
+      tags: [storage]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: Событие найдено
+          content:
+            application/json:
+              example: { "id": 42, "text": "привет", "checksum": "9f86d0...", "producer": "kafka", "created_at": "2026-08-31T10:00:00Z" }
+        "404":
+          description: Событие не найдено
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /files:
+    get:
+      summary: Список файлов и поиск по тегам
+      description: |
+        source=s3 перебирает бакет и читает теги каждого объекта,
+        source=es отвечает по индексу Elasticsearch, source=hdfs
+        показывает каталог HDFS.
+      tags: [storage]
+      parameters:
+        - name: backend
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [s3, hdfs]
+        - name: tag
+          in: query
+          required: false
+          schema:
+            type: string
+          example: kind=report
+        - name: source
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [s3, es, hdfs]
+        - name: prefix
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Найденные файлы и время выборки
+          content:
+            application/json:
+              example:
+                source: elasticsearch
+                total: 2
+                took_ms: 3
+                elapsed_ms: 6
+                files: []
+    post:
+      summary: Загрузить файл (закрытый раздел)
+      description: |
+        Тело запроса — содержимое файла потоком. При неизвестном размере
+        клиент S3 сам разбивает поток на части и грузит multipart.
+        backend=hdfs кладет файл в HDFS с репликацией.
+      tags: [storage]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema:
+            type: string
+          example: report.bin
+        - name: backend
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [s3, hdfs]
+        - name: tags
+          in: query
+          required: false
+          schema:
+            type: string
+          example: kind=report,owner=evgenza
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: Файл сохранен
+          content:
+            application/json:
+              example:
+                backend: s3
+                object:
+                  key: report.bin
+                  size: 104857600
+                  etag: "b1946ac9-7"
+                  version_id: "b6ff7d4a"
+                  parts: 7
+        "400":
+          description: Не задано имя файла
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Нет или недействительный токен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: Хранилище не приняло файл
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /files/{key}:
+    get:
+      summary: Скачать файл целиком или частично
+      description: |
+        Заголовок Range (bytes=начало-конец) передается в хранилище,
+        ответ приходит со статусом 206 и заголовком Content-Range.
+      tags: [storage]
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: backend
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [s3, hdfs]
+        - name: version
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Версия объекта в S3
+        - name: Range
+          in: header
+          required: false
+          schema:
+            type: string
+          example: bytes=0-1023
+      responses:
+        "200":
+          description: Файл целиком
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: Запрошенный диапазон байт
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Файл не найден
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /files/{key}/versions:
+    get:
+      summary: Версии объекта в S3
+      tags: [storage]
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Список версий, свежая помечена is_latest
+          content:
+            application/json:
+              example:
+                key: report.bin
+                total: 2
+                versions:
+                  - { "key": "report.bin", "size": 1024, "version_id": "b6ff7d4a", "is_latest": true }
+                  - { "key": "report.bin", "size": 512, "version_id": "0a1c33ef" }
+        "503":
+          description: S3 не настроен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /files/{key}/tags:
+    put:
+      summary: Заменить теги объекта (закрытый раздел)
+      tags: [storage]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+            example: { "kind": "report", "owner": "evgenza" }
+      responses:
+        "200":
+          description: Теги обновлены
+          content:
+            application/json:
+              example: { "key": "report.bin", "tags": { "kind": "report" } }
+        "401":
+          description: Нет или недействительный токен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /gw/messages:
     get:
       summary: Список сообщений через gateway (HTTP+JSON)

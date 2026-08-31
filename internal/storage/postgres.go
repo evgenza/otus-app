@@ -119,6 +119,29 @@ func (p *Postgres) List(ctx context.Context) ([]handlers.Message, error) {
 	return msgs, rows.Err()
 }
 
+// Search ищет подстроку в тексте через ILIKE. Индекс тут не работает:
+// шаблон с ведущим процентом заставляет планировщик читать всю таблицу
+func (p *Postgres) Search(ctx context.Context, query string, limit int) ([]handlers.Message, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT id, text, text_hash, created_at FROM messages
+		 WHERE text ILIKE '%' || $1 || '%' ORDER BY id DESC LIMIT $2`, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	msgs := make([]handlers.Message, 0)
+	for rows.Next() {
+		var m handlers.Message
+		if err := rows.Scan(&m.ID, &m.Text, &m.Checksum, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		m.ChecksumOK = m.Checksum == security.Checksum(m.Text)
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
+}
+
 func (p *Postgres) Close() {
 	p.pool.Close()
 }

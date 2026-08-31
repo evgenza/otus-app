@@ -28,7 +28,28 @@ var (
 		Name: "otus_messages_created_total",
 		Help: "Количество созданных сообщений",
 	})
+
+	storageOps = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "otus_storage_ops_total",
+		Help: "Количество обращений к распределенным хранилищам",
+	}, []string{"backend", "op", "result"})
+
+	storageDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "otus_storage_op_duration_seconds",
+		Help:    "Время обращения к распределенным хранилищам",
+		Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30},
+	}, []string{"backend", "op"})
 )
+
+// ObserveStorage пишет метрики одной операции с хранилищем
+func ObserveStorage(backend, op string, start time.Time, err error) {
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	storageOps.WithLabelValues(backend, op, result).Inc()
+	storageDuration.WithLabelValues(backend, op).Observe(time.Since(start).Seconds())
+}
 
 type statusRecorder struct {
 	http.ResponseWriter

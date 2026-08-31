@@ -13,12 +13,17 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/evgenza/otus-app/internal/audit"
+	"github.com/evgenza/otus-app/internal/blobstore"
+	"github.com/evgenza/otus-app/internal/broker"
 	"github.com/evgenza/otus-app/internal/coord"
+	"github.com/evgenza/otus-app/internal/cstore"
 	"github.com/evgenza/otus-app/internal/grpcserver"
 	"github.com/evgenza/otus-app/internal/handlers"
+	"github.com/evgenza/otus-app/internal/hdfsstore"
 	"github.com/evgenza/otus-app/internal/httpserver"
 	"github.com/evgenza/otus-app/internal/observability"
 	"github.com/evgenza/otus-app/internal/ratelimit"
+	"github.com/evgenza/otus-app/internal/search"
 	"github.com/evgenza/otus-app/internal/security"
 	"github.com/evgenza/otus-app/internal/storage"
 	"github.com/evgenza/otus-app/internal/tcache"
@@ -88,6 +93,46 @@ func run() error {
 		apiOpts = append(apiOpts, handlers.WithCache(cache))
 	}
 
+	// Брокеры и распределенные хранилища: каждое включается своими настройками.
+	bus := broker.NewBus(ctx)
+	defer bus.Close()
+	if len(bus.Names()) > 0 {
+		apiOpts = append(apiOpts, handlers.WithBus(bus))
+	}
+
+	blobs, err := blobstore.New(ctx)
+	if err != nil {
+		slog.Warn("S3 недоступен, работаю без него", "err", err)
+	}
+	if blobs != nil {
+		apiOpts = append(apiOpts, handlers.WithBlobs(blobs))
+	}
+
+	files, err := hdfsstore.New(ctx)
+	if err != nil {
+		slog.Warn("HDFS недоступен, работаю без него", "err", err)
+	}
+	if files != nil {
+		apiOpts = append(apiOpts, handlers.WithFiles(files))
+	}
+
+	events, err := cstore.New(ctx)
+	if err != nil {
+		slog.Warn("Cassandra недоступна, работаю без нее", "err", err)
+	}
+	if events != nil {
+		defer events.Close()
+		apiOpts = append(apiOpts, handlers.WithEvents(events))
+	}
+
+	index, err := search.New(ctx)
+	if err != nil {
+		slog.Warn("Elasticsearch недоступен, работаю без него", "err", err)
+	}
+	if index != nil {
+		apiOpts = append(apiOpts, handlers.WithSearch(index))
+	}
+
 	tlsCfg, err := security.ServerTLS()
 	if err != nil {
 		return err
@@ -122,6 +167,7 @@ func run() error {
 	}
 
 	slog.Info("сервис запущен",
-		"version", version.Version, "port", port, "grpc_port", grpcPort, "mtls", tlsCfg != nil)
+		"version", version.Version, "port", port, "grpc_port", grpcPort, "mtls", tlsCfg != nil,
+		"brokers", bus.Names())
 	return httpserver.Run(srv)
 }

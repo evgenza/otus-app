@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/evgenza/otus-app/internal/audit"
+	"github.com/evgenza/otus-app/internal/broker"
 	"github.com/evgenza/otus-app/internal/handlers/apidocs"
 	"github.com/evgenza/otus-app/internal/observability"
 	"github.com/evgenza/otus-app/internal/ratelimit"
@@ -43,12 +44,23 @@ type MessagesCache interface {
 	Delete(ctx context.Context, key string)
 }
 
+// EventBus рассылает события о созданных сообщениях в брокеры.
+type EventBus interface {
+	Publish(ctx context.Context, ev broker.Event)
+	Names() []string
+}
+
 type API struct {
 	store       MessageStore
 	authEnabled bool
 	limiter     *ratelimit.Limiter
 	auditLog    AuditLog
 	cache       MessagesCache
+	bus         EventBus
+	blobs       Blobs
+	files       Files
+	events      Events
+	search      Search
 }
 
 type Option func(*API)
@@ -65,6 +77,11 @@ func WithCache(c MessagesCache) Option {
 	return func(a *API) { a.cache = c }
 }
 
+// WithBus подключает шину брокеров.
+func WithBus(b EventBus) Option {
+	return func(a *API) { a.bus = b }
+}
+
 func (a *API) publicRoutes(auth *security.Auth) map[string]http.Handler {
 	return map[string]http.Handler{
 		"GET /health":    http.HandlerFunc(health),
@@ -74,6 +91,15 @@ func (a *API) publicRoutes(auth *security.Auth) map[string]http.Handler {
 		"GET /audit":     http.HandlerFunc(a.listAudit),
 		"GET /messages":  a.limiter.Middleware(http.HandlerFunc(a.listMessages)),
 		"POST /messages": auth.Middleware(a.limiter.Middleware(http.HandlerFunc(a.createMessage))),
+
+		"GET /search":               a.limiter.Middleware(http.HandlerFunc(a.searchMessages)),
+		"GET /events":               http.HandlerFunc(a.listEvents),
+		"GET /events/{id}":          http.HandlerFunc(a.getEvent),
+		"GET /files":                http.HandlerFunc(a.listFiles),
+		"POST /files":               auth.Middleware(http.HandlerFunc(a.uploadFile)),
+		"GET /files/{key}":          http.HandlerFunc(a.downloadFile),
+		"GET /files/{key}/versions": http.HandlerFunc(a.listVersions),
+		"PUT /files/{key}/tags":     auth.Middleware(http.HandlerFunc(a.updateTags)),
 	}
 }
 
@@ -149,6 +175,17 @@ func (a *API) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	observability.MessagesCreated.Inc()
+	if a.bus != nil {
+		pubCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+		defer cancel()
+		a.bus.Publish(pubCtx, broker.Event{
+			ID:        msg.ID,
+			Text:      msg.Text,
+			Checksum:  msg.Checksum,
+			CreatedAt: msg.CreatedAt,
+			Producer:  "otus-app",
+		})
+	}
 	if a.auditLog != nil {
 		a.auditLog.Record(r.Context(), "создано сообщение", msg.Text)
 	}
