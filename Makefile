@@ -43,6 +43,44 @@ test-integration: ## Интеграционные тесты (нужен Postgre
 loadtest: ## Нагрузочный тест k6 (BASE_URL задаёт цель)
 	docker run --rm -e BASE_URL="$(BASE_URL)" -v "$(PWD)/loadtest:/loadtest" grafana/k6 run /loadtest/script.js
 
+.PHONY: brokers-up
+brokers-up: ## Поднять стенд брокеров (Kafka, RabbitMQ, NATS)
+	docker compose -f ds/docker-compose.brokers.yml build app
+	docker compose -f ds/docker-compose.brokers.yml up -d
+
+.PHONY: brokers-test
+brokers-test: ## Тесты брокеров под нагрузкой: отказы узлов и масштабирование
+	bash scripts/broker-failover-test.sh
+
+.PHONY: brokers-down
+brokers-down: ## Остановить стенд брокеров
+	docker compose -f ds/docker-compose.brokers.yml down -v
+
+.PHONY: storage-up
+storage-up: ## Поднять стенд хранилищ (MinIO, HDFS, Cassandra, Elasticsearch)
+	docker compose -f ds/docker-compose.storage.yml build app
+	docker compose -f ds/docker-compose.storage.yml up -d
+
+.PHONY: storage-test
+storage-test: ## Тесты хранилищ под нагрузкой с отказами узлов
+	bash scripts/storage-failover-test.sh
+
+.PHONY: s3-test
+s3-test: ## Теги, версии, частичная и multipart-загрузка в S3
+	bash scripts/s3-features-test.sh
+
+.PHONY: cassandra-test
+cassandra-test: ## Запросы к Cassandra и уровни консистентности
+	bash scripts/cassandra-queries-test.sh
+
+.PHONY: search-bench
+search-bench: ## Сравнение поиска: Elasticsearch, PostgreSQL, Cassandra
+	bash scripts/search-benchmark.sh
+
+.PHONY: storage-down
+storage-down: ## Остановить стенд хранилищ
+	docker compose -f ds/docker-compose.storage.yml down -v
+
 .PHONY: bench
 bench: ## Сравнение производительности HTTP+JSON и gRPC
 	go test -run '^$$' -bench . -benchtime 2s ./internal/grpcserver/

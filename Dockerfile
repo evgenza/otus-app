@@ -17,7 +17,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
       -X github.com/evgenza/otus-app/internal/version.Date=${DATE}" \
     -o /out/app ./cmd/app \
     && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/gateway ./cmd/gateway \
-    && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/chaosproxy ./cmd/chaosproxy
+    && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/chaosproxy ./cmd/chaosproxy \
+    && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/consumer ./cmd/consumer
 
 FROM alpine:3.20
 
@@ -28,6 +29,7 @@ WORKDIR /app
 COPY --from=builder /out/app /app/app
 COPY --from=builder /out/gateway /app/gateway
 COPY --from=builder /out/chaosproxy /app/chaosproxy
+COPY --from=builder /out/consumer /app/consumer
 
 USER app
 EXPOSE 8080

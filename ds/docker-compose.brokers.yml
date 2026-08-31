@@ -1,0 +1,247 @@
+name: otus-brokers
+
+# Стенд брокеров сообщений: Kafka (KRaft, 3 узла), RabbitMQ (кластер из 3
+# узлов, quorum-очереди), NATS (кластер из 3 узлов, JetStream). Приложение
+# публикует событие о каждом созданном сообщении сразу во все три брокера,
+# воркеры читают события и складывают их в Elasticsearch.
+
+x-kafka: &kafka
+  image: apache/kafka:3.9.0
+  environment: &kafka-env
+    KAFKA_PROCESS_ROLES: broker,controller
+    KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+    KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+    KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+    KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+    # Служебные топики тоже должны переживать отказ узла.
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+    KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+    KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+    KAFKA_DEFAULT_REPLICATION_FACTOR: "3"
+    KAFKA_MIN_INSYNC_REPLICAS: "2"
+    KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+    KAFKA_NUM_PARTITIONS: "6"
+    CLUSTER_ID: otus-kraft-cluster-01
+    KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+  healthcheck: &kafka-health
+    test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+    interval: 10s
+    timeout: 5s
+    retries: 12
+
+x-rabbit: &rabbit
+  image: rabbitmq:3.13-management
+  environment: &rabbit-env
+    RABBITMQ_ERLANG_COOKIE: otus-cluster-cookie
+    RABBITMQ_DEFAULT_USER: otus
+    RABBITMQ_DEFAULT_PASS: otuspass
+  volumes:
+    - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+  healthcheck: &rabbit-health
+    test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+    interval: 10s
+    timeout: 5s
+    retries: 12
+
+x-nats: &nats
+  image: nats:2.10-alpine
+  healthcheck: &nats-health
+    test: ["CMD-SHELL", "wget -q -O- http://localhost:8222/healthz || exit 1"]
+    interval: 10s
+    timeout: 3s
+    retries: 12
+
+x-consumer: &consumer
+  image: evgenza/otus-app:ds
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  entrypoint: ["/app/consumer"]
+  environment: &consumer-env
+    ELASTIC_URLS: http://elasticsearch:9200
+    ELASTIC_REFRESH: "false"
+    CONSUMER_WORKERS: "1"
+    METRICS_PORT: "8091"
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://localhost:8091/health || exit 1"]
+    interval: 15s
+    timeout: 3s
+    retries: 5
+  restart: unless-stopped
+
+services:
+  kafka-1:
+    <<: *kafka
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: "1"
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092
+    healthcheck: *kafka-health
+
+  kafka-2:
+    <<: *kafka
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: "2"
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
+    healthcheck: *kafka-health
+
+  kafka-3:
+    <<: *kafka
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: "3"
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092
+    healthcheck: *kafka-health
+
+  rabbit-1:
+    <<: *rabbit
+    hostname: rabbit-1
+    ports:
+      - "15672:15672"
+    healthcheck: *rabbit-health
+
+  rabbit-2:
+    <<: *rabbit
+    hostname: rabbit-2
+    depends_on:
+      rabbit-1:
+        condition: service_healthy
+    healthcheck: *rabbit-health
+
+  rabbit-3:
+    <<: *rabbit
+    hostname: rabbit-3
+    depends_on:
+      rabbit-1:
+        condition: service_healthy
+    healthcheck: *rabbit-health
+
+  nats-1:
+    <<: *nats
+    command: ["--name", "nats-1", "--cluster_name", "otus", "--http_port", "8222",
+              "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222",
+              "-js", "-sd", "/data"]
+    healthcheck: *nats-health
+
+  nats-2:
+    <<: *nats
+    command: ["--name", "nats-2", "--cluster_name", "otus", "--http_port", "8222",
+              "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222",
+              "-js", "-sd", "/data"]
+    healthcheck: *nats-health
+
+  nats-3:
+    <<: *nats
+    command: ["--name", "nats-3", "--cluster_name", "otus", "--http_port", "8222",
+              "--cluster", "nats://0.0.0.0:6222",
+              "--routes", "nats://nats-1:6222,nats://nats-2:6222,nats://nats-3:6222",
+              "-js", "-sd", "/data"]
+    healthcheck: *nats-health
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: otus
+      POSTGRES_PASSWORD: otuspass
+      POSTGRES_DB: otus
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U otus -d otus"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  app:
+    image: evgenza/otus-app:ds
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    entrypoint: ["/app/app"]
+    environment:
+      PORT: "8080"
+      GRPC_PORT: "9091"
+      DATABASE_URL: postgres://otus:otuspass@postgres:5432/otus?sslmode=disable
+      KAFKA_BROKERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      KAFKA_TOPIC: otus.messages
+      RABBITMQ_URLS: amqp://otus:otuspass@rabbit-1:5672/,amqp://otus:otuspass@rabbit-2:5672/,amqp://otus:otuspass@rabbit-3:5672/
+      NATS_URLS: nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222
+      ELASTIC_URLS: http://elasticsearch:9200
+      # Каждый воркер пишет в свой индекс, чтобы считать доставку по
+      # брокерам отдельно; поиск в API идет по индексу ветки Kafka.
+      ELASTIC_INDEX: otus-kafka
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+      rabbit-1:
+        condition: service_healthy
+      nats-1:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  consumer-kafka:
+    <<: *consumer
+    environment:
+      <<: *consumer-env
+      BROKER: kafka
+      KAFKA_BROKERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      KAFKA_TOPIC: otus.messages
+      KAFKA_GROUP: otus-kafka
+      # Ноль - синхронный коммит offset-а на каждое событие. Значение
+      # вроде 1s включает пакетный коммит и поднимает пропускную
+      # способность ценой возможных повторов после падения воркера.
+      KAFKA_COMMIT_INTERVAL: ${KAFKA_COMMIT_INTERVAL:-0s}
+      ELASTIC_INDEX: otus-kafka
+    depends_on:
+      app:
+        condition: service_started
+
+  consumer-rabbit:
+    <<: *consumer
+    environment:
+      <<: *consumer-env
+      BROKER: rabbitmq
+      RABBITMQ_URLS: amqp://otus:otuspass@rabbit-1:5672/,amqp://otus:otuspass@rabbit-2:5672/,amqp://otus:otuspass@rabbit-3:5672/
+      ELASTIC_INDEX: otus-rabbit
+    depends_on:
+      app:
+        condition: service_started
+
+  consumer-nats:
+    <<: *consumer
+    environment:
+      <<: *consumer-env
+      BROKER: nats
+      NATS_URLS: nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222
+      ELASTIC_INDEX: otus-nats
+    depends_on:
+      app:
+        condition: service_started

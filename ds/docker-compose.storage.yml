@@ -1,0 +1,264 @@
+name: otus-storage
+
+# Стенд распределенных хранилищ: S3 (MinIO, 4 узла, erasure coding), HDFS
+# (namenode и 3 датаноды, репликация 3), Cassandra (3 узла, RF=3),
+# Elasticsearch (3 узла). Событийная шина здесь одна - Kafka в один узел:
+# она не предмет этого стенда, а транспорт от приложения к воркеру.
+
+x-minio: &minio
+  image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+  command: server http://minio-{1...4}/data --console-address ":9001"
+  environment: &minio-env
+    MINIO_ROOT_USER: minioadmin
+    MINIO_ROOT_PASSWORD: minioadmin
+  healthcheck: &minio-health
+    test: ["CMD-SHELL", "mc ready local || exit 1"]
+    interval: 10s
+    timeout: 5s
+    retries: 20
+
+x-datanode: &datanode
+  image: apache/hadoop:3.4.1
+  command: ["hdfs", "datanode"]
+  environment: &hadoop-env
+    HADOOP_HOME: /opt/hadoop
+    CORE-SITE.XML_fs.defaultFS: hdfs://namenode:8020
+    HDFS-SITE.XML_dfs.replication: "3"
+    HDFS-SITE.XML_dfs.namenode.rpc-bind-host: 0.0.0.0
+    HDFS-SITE.XML_dfs.datanode.use.datanode.hostname: "true"
+    HDFS-SITE.XML_dfs.client.use.datanode.hostname: "true"
+    # Датанода считается мертвой через 30 секунд, а не через 10 минут:
+    # иначе отказ узла не увидеть за время теста.
+    HDFS-SITE.XML_dfs.namenode.heartbeat.recheck-interval: "10000"
+    HDFS-SITE.XML_dfs.heartbeat.interval: "3"
+    HDFS-SITE.XML_dfs.permissions.enabled: "false"
+    HDFS-SITE.XML_dfs.namenode.name.dir: /hadoop/dfs/name
+    HDFS-SITE.XML_dfs.datanode.data.dir: /hadoop/dfs/data
+  user: root
+
+x-cassandra: &cassandra
+  image: cassandra:5.0
+  environment: &cassandra-env
+    CASSANDRA_CLUSTER_NAME: otus
+    CASSANDRA_SEEDS: cassandra-1,cassandra-2
+    CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+    CASSANDRA_DC: dc1
+    MAX_HEAP_SIZE: 512M
+    HEAP_NEWSIZE: 128M
+  healthcheck: &cassandra-health
+    test: ["CMD-SHELL", "nodetool status | grep -q '^UN'"]
+    interval: 15s
+    timeout: 10s
+    retries: 30
+    start_period: 60s
+
+x-elastic: &elastic
+  image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+  environment: &elastic-env
+    cluster.name: otus-search
+    discovery.seed_hosts: es-1,es-2,es-3
+    cluster.initial_master_nodes: es-1,es-2,es-3
+    xpack.security.enabled: "false"
+    bootstrap.memory_lock: "true"
+    ES_JAVA_OPTS: -Xms512m -Xmx512m
+  ulimits:
+    memlock: {soft: -1, hard: -1}
+  healthcheck: &elastic-health
+    test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+    interval: 10s
+    timeout: 5s
+    retries: 30
+
+services:
+  minio-1:
+    <<: *minio
+    hostname: minio-1
+    healthcheck: *minio-health
+    volumes: ["minio-1-data:/data"]
+    ports: ["9000:9000", "9001:9001"]
+  minio-2: {<<: *minio, hostname: minio-2, healthcheck: *minio-health, volumes: ["minio-2-data:/data"]}
+  minio-3: {<<: *minio, hostname: minio-3, healthcheck: *minio-health, volumes: ["minio-3-data:/data"]}
+  minio-4: {<<: *minio, hostname: minio-4, healthcheck: *minio-health, volumes: ["minio-4-data:/data"]}
+
+  namenode:
+    image: apache/hadoop:3.4.1
+    hostname: namenode
+    user: root
+    # Форматируем только при первом запуске: иначе рестарт контейнера
+    # выдал бы новый cluster id, и датаноды со старым отказались бы
+    # регистрироваться.
+    command: ["/bin/bash", "-c", "[ -d /hadoop/dfs/name/current ] || hdfs namenode -format -force -nonInteractive; hdfs namenode"]
+    environment:
+      <<: *hadoop-env
+    volumes:
+      - namenode-data:/hadoop/dfs/name
+    ports:
+      - "9870:9870"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9870/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  datanode-1:
+    <<: *datanode
+    hostname: datanode-1
+    volumes: ["datanode-1-data:/hadoop/dfs/data"]
+    depends_on: {namenode: {condition: service_healthy}}
+  datanode-2:
+    <<: *datanode
+    hostname: datanode-2
+    volumes: ["datanode-2-data:/hadoop/dfs/data"]
+    depends_on: {namenode: {condition: service_healthy}}
+  datanode-3:
+    <<: *datanode
+    hostname: datanode-3
+    volumes: ["datanode-3-data:/hadoop/dfs/data"]
+    depends_on: {namenode: {condition: service_healthy}}
+
+  cassandra-1: {<<: *cassandra, hostname: cassandra-1, healthcheck: *cassandra-health}
+  cassandra-2:
+    <<: *cassandra
+    hostname: cassandra-2
+    healthcheck: *cassandra-health
+    depends_on:
+      cassandra-1:
+        condition: service_healthy
+  cassandra-3:
+    <<: *cassandra
+    hostname: cassandra-3
+    healthcheck: *cassandra-health
+    depends_on:
+      cassandra-2:
+        condition: service_healthy
+
+  es-1:
+    <<: *elastic
+    hostname: es-1
+    environment:
+      <<: *elastic-env
+      node.name: es-1
+    ports:
+      - "9200:9200"
+    healthcheck: *elastic-health
+  es-2:
+    <<: *elastic
+    hostname: es-2
+    environment:
+      <<: *elastic-env
+      node.name: es-2
+    healthcheck: *elastic-health
+  es-3:
+    <<: *elastic
+    hostname: es-3
+    environment:
+      <<: *elastic-env
+      node.name: es-3
+    healthcheck: *elastic-health
+
+  kafka:
+    image: apache/kafka:3.9.0
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      CLUSTER_ID: otus-storage-cluster
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: otus
+      POSTGRES_PASSWORD: otuspass
+      POSTGRES_DB: otus
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U otus -d otus"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    image: evgenza/otus-app:ds
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    entrypoint: ["/app/app"]
+    environment: &storage-env
+      PORT: "8080"
+      GRPC_PORT: "9091"
+      DATABASE_URL: postgres://otus:otuspass@postgres:5432/otus?sslmode=disable
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_TOPIC: otus.messages
+      KAFKA_PARTITIONS: "6"
+      KAFKA_REPLICATION: "1"
+      S3_ENDPOINT: minio-1:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: otus-files
+      S3_PART_SIZE_MB: "16"
+      HDFS_NAMENODES: namenode:8020
+      HDFS_USER: root
+      HDFS_DIR: /otus/files
+      HDFS_REPLICATION: "3"
+      HDFS_BLOCK_SIZE_MB: "16"
+      CASSANDRA_HOSTS: cassandra-1,cassandra-2,cassandra-3
+      CASSANDRA_KEYSPACE: otus
+      CASSANDRA_RF: "3"
+      CASSANDRA_CONSISTENCY: QUORUM
+      ELASTIC_URLS: http://es-1:9200,http://es-2:9200,http://es-3:9200
+      ELASTIC_INDEX: otus-messages
+      ELASTIC_REFRESH: ${ELASTIC_REFRESH:-false}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+      minio-1: {condition: service_healthy}
+      namenode: {condition: service_healthy}
+      cassandra-3: {condition: service_healthy}
+      es-1: {condition: service_healthy}
+    restart: unless-stopped
+
+  consumer:
+    image: evgenza/otus-app:ds
+    entrypoint: ["/app/consumer"]
+    environment:
+      <<: *storage-env
+      BROKER: kafka
+      KAFKA_GROUP: otus-storage
+      CONSUMER_WORKERS: "1"
+      METRICS_PORT: "8091"
+      ELASTIC_REFRESH: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8091/health || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      app: {condition: service_started}
+    restart: unless-stopped
+
+volumes:
+  namenode-data:
+  datanode-1-data:
+  datanode-2-data:
+  datanode-3-data:
+  minio-1-data:
+  minio-2-data:
+  minio-3-data:
+  minio-4-data:

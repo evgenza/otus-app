@@ -70,6 +70,9 @@ docker compose -f "$obs/docker-compose.yml" config -q
 KEYCLOAK_ADMIN_PASSWORD=dummy GRAFANA_ADMIN_PASSWORD=dummy GRAFANA_OAUTH_SECRET=dummy \
 OAUTH2_PROXY_CLIENT_SECRET=dummy OAUTH2_PROXY_COOKIE_SECRET=dummy TAG=latest \
   docker compose -f "$obs/docker-compose.server.yml" config -q
+docker compose -f ha/docker-compose.ha.yml config -q
+docker compose -f ds/docker-compose.brokers.yml config -q
+docker compose -f ds/docker-compose.storage.yml config -q
 echo "    ok"
 
 echo "Все конфиги валидны"

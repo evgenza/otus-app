@@ -52,6 +52,30 @@ gRPC-сервер на порту 9091 (контракт — `api/proto/messages
 - **Кэш** списка сообщений в Tarantool (`TARANTOOL_ADDRS`): TTL 10 секунд,
   заголовок `X-Cache: HIT/MISS`, создание сообщения сбрасывает кэш.
 
+Брокеры сообщений и распределенные хранилища (тоже включаются переменными
+окружения):
+
+- **Событийная шина.** Каждое созданное сообщение публикуется событием сразу
+  во все настроенные брокеры: Kafka (`KAFKA_BROKERS`, acks=all), RabbitMQ
+  (`RABBITMQ_URLS`, quorum-очередь с подтверждением публикации) и NATS
+  JetStream (`NATS_URLS`, поток на три реплики). Публикация best-effort:
+  недоступный брокер не валит запрос, но виден в метриках.
+- **Воркер** `cmd/consumer` читает события из выбранного брокера (`BROKER`)
+  и раскладывает их в Cassandra и Elasticsearch. Масштабируется числом
+  реплик контейнера и переменной `CONSUMER_WORKERS`.
+- **S3** (`S3_ENDPOINT`, MinIO): `POST /files` кладет файл потоком с
+  автоматической multipart-загрузкой, `GET /files/{key}` отдает объект и
+  понимает заголовок `Range`, есть теги (`PUT /files/{key}/tags`) и версии
+  (`GET /files/{key}/versions`).
+- **HDFS** (`HDFS_NAMENODES`): те же маршруты с `?backend=hdfs`, файл режется
+  на блоки и раскладывается по датанодам с репликацией 3.
+- **Cassandra** (`CASSANDRA_HOSTS`): лента событий на `GET /events` и выборка
+  по ключу на `GET /events/{id}`, запись кворумом на RF=3.
+- **Elasticsearch** (`ELASTIC_URLS`): полнотекстовый поиск с русской
+  морфологией на `GET /search?q=...` и поиск файлов по тегам
+  (`GET /files?tag=kind=report`). Параметр `engine` у `/search` позволяет
+  выполнить тот же запрос в PostgreSQL или Cassandra и сравнить.
+
 Версия и дата зашиваются в бинарь при компиляции через `-ldflags`
 (пакет `internal/version`).
 
@@ -90,6 +114,22 @@ docs/INTERACTION.md                   протокол проверки взаи
 docs/DATABASES.md                     протокол проверки СУБД и кэширования (HA, отказы, шаблоны)
 ha/docker-compose.ha.yml              отказоустойчивый стенд: Postgres, Mongo, Valkey, Tarantool, etcd
 scripts/ha-failover-test.sh           тесты отказов узлов СУБД под нагрузкой
+cmd/consumer/main.go                  воркер: брокер -> Cassandra + Elasticsearch
+internal/broker/                      публикация и чтение событий: Kafka, RabbitMQ, NATS
+internal/blobstore/                   объекты в S3: теги, версии, диапазоны, multipart
+internal/hdfsstore/                   файлы в HDFS
+internal/cstore/                      лента событий в Cassandra
+internal/search/                      индексация и поиск в Elasticsearch
+ds/docker-compose.brokers.yml         стенд брокеров: Kafka, RabbitMQ, NATS (по 3 узла)
+ds/docker-compose.storage.yml         стенд хранилищ: MinIO, HDFS, Cassandra, Elasticsearch
+scripts/broker-failover-test.sh       тесты брокеров: отказы узлов и масштабирование
+scripts/storage-failover-test.sh      тесты хранилищ под нагрузкой с отказами узлов
+scripts/s3-features-test.sh           теги, версии, частичная и multipart-загрузка
+scripts/cassandra-queries-test.sh     запросы к Cassandra и уровни консистентности
+scripts/search-benchmark.sh           сравнение поиска: Elasticsearch, PostgreSQL, Cassandra
+loadtest/brokers.js                   нагрузочный сценарий k6 для брокеров
+loadtest/storage.js                   нагрузочный сценарий k6 для хранилищ
+docs/BROKERS-STORAGE.md               протокол проверки брокеров и распределенных хранилищ
 ```
 
 ## Требования
@@ -176,6 +216,31 @@ bash scripts/ha-failover-test.sh
 Скрипт держит нагрузку на API, по очереди убивает и возвращает узлы каждой
 СУБД, отдельно проверяет потерю кворума etcd и печатает статистику ошибок.
 Протокол и выводы — в [docs/DATABASES.md](docs/DATABASES.md).
+
+**Стенд брокеров сообщений** (Kafka, RabbitMQ и NATS по три узла, приложение
+и три воркера — 15 контейнеров):
+
+```bash
+make brokers-up
+make brokers-test    # нагрузка k6, отказы узлов, масштабирование воркеров
+make brokers-down
+```
+
+**Стенд распределенных хранилищ** (MinIO из четырех узлов, HDFS с тремя
+датанодами, Cassandra и Elasticsearch по три узла — 18 контейнеров):
+
+```bash
+make storage-up
+make storage-test      # нагрузка k6 с отказами узлов хранилищ
+make s3-test           # теги, версии, Range, multipart на 200 МБ
+make cassandra-test    # запросы к Cassandra и уровни консистентности
+make search-bench      # Elasticsearch против PostgreSQL и Cassandra
+make storage-down
+```
+
+Стенды поднимаются по очереди: вместе они не помещаются в память. Стенду
+хранилищ нужно около 10 ГиБ, доступных Docker. Протокол и выводы — в
+[docs/BROKERS-STORAGE.md](docs/BROKERS-STORAGE.md).
 
 **Нагрузочное тестирование** (k6) против развёрнутого сервиса:
 
