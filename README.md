@@ -2,30 +2,56 @@
 
 HTTP-сервис на Go с хранением данных в PostgreSQL. Сделан для домашек по CI/CD и
 тестированию микросервисов: собирается локально с линтером и тестами, в GitHub
-Actions проверяется (юнит-тесты блокируют упаковку, интеграционные — отдельным
+Actions проверяется (юнит-тесты блокируют упаковку, интеграционные - отдельным
 ручным треком), пакуется в Docker-образ, публикуется в Docker Hub и
 автоматически разворачивается на сервере через docker compose. Для нагрузочного
 тестирования есть сценарий на k6.
+
+## Домашнее задание: отказоустойчивость
+
+Изменения, результаты проверок и скриншоты:
+[docs/RESILIENCE.md](docs/RESILIENCE.md).
+
+Быстрый запуск стенда из текущего кода (Docker Compose, Python 3 для проверки):
+
+```bash
+make resilience-up
+make resilience-test
+make resilience-down
+```
+
+В стенде две реплики приложения за nginx, два потребителя, три узла NATS
+JetStream, PostgreSQL, Elasticsearch, Prometheus и Jaeger. Сообщения сохраняются
+вместе с заданиями outbox, доставка в брокеры идет в фоне.
+
+Адреса доступны только на локальном интерфейсе:
+
+- API и Swagger: <http://localhost:18080/swagger/>;
+- Prometheus: <http://localhost:19090>;
+- Jaeger: <http://localhost:16687>.
+
+JWT и mTLS в этом стенде отключены. PostgreSQL, Elasticsearch и nginx одиночные;
+отказ всего хоста не покрывается. Настройка защиты и кластеров описана ниже.
 
 ## Что умеет
 
 HTTP-сервер на порту 8080:
 
-- `GET /health` — `{"status":"работает"}`, нужен для health-check.
-- `GET /version` — версия и дата сборки.
-- `GET /hello` — `{"message":"Привет, мир!"}`, можно передать `?name=...`.
-- `GET /status` — статусная страница на `html/template`: версия, аптайм,
+- `GET /health` - `{"status":"работает"}`, нужен для health-check.
+- `GET /version` - версия и дата сборки.
+- `GET /hello` - `{"message":"Привет, мир!"}`, можно передать `?name=...`.
+- `GET /status` - статусная страница на `html/template`: версия, аптайм,
   состояние БД и контрольных сумм.
-- `GET /swagger/` — Swagger UI, спецификация OpenAPI вшита в бинарь.
-- `POST /messages` — принимает `{"text":"..."}`, сохраняет сообщение в БД,
+- `GET /swagger/` - Swagger UI, спецификация OpenAPI вшита в бинарь.
+- `POST /messages` - принимает `{"text":"..."}`, сохраняет сообщение в БД,
   возвращает созданную запись с `id`, `created_at` и контрольной суммой текста.
   Требует JWT из Keycloak (заголовок `Authorization: Bearer ...`). Поддерживает
-  заголовок `Idempotency-Key`: повтор запроса с тем же ключом не создаёт
-  дубликат (gateway проставляет ключ автоматически).
-- `GET /messages` — список последних сообщений из БД, у каждого — результат
+  заголовок `Idempotency-Key`: повтор с тем же ключом и текстом не создает
+  дубликат, другой текст возвращает 409 (gateway проставляет ключ автоматически).
+- `GET /messages` - список последних сообщений из БД, у каждого - результат
   проверки контрольной суммы (`checksum_ok`).
 
-gRPC-сервер на порту 9091 (контракт — `api/proto/messages.proto`): unary
+gRPC-сервер на порту 9091 (контракт - `api/proto/messages.proto`): unary
 `CreateMessage`, server streaming `ListMessages`, client streaming
 `BatchCreate`, bidirectional `Chat`. Создание закрыто тем же JWT, что и HTTP
 (токен в метаданных `authorization`). Gateway выводит gRPC наружу мостом:
@@ -34,20 +60,20 @@ gRPC-сервер на порту 9091 (контракт — `api/proto/messages
 
 Между gateway и app стоит chaos-прокси (`cmd/chaosproxy`): считает трафик в
 обе стороны метриками Prometheus и по командам на управляющий порт вносит
-помехи — задержку, повтор запросов, обрывы, снижение скорости.
+помехи - задержку, повтор запросов, обрывы, снижение скорости.
 
 Работа с СУБД и кэшированием (все включается переменными окружения, без
 них приложение работает как раньше):
 
-- **Rate Limiter** на Valkey (`VALKEY_ADDRS` — адреса sentinel-ов,
+- **Rate Limiter** на Valkey (`VALKEY_ADDRS` - адреса sentinel-ов,
   `VALKEY_MASTER_NAME`): счетчик в фиксированном окне на минуту, при
-  превышении — 429. Лимит задается `RATE_LIMIT` и меняется на лету через
+  превышении - 429. Лимит задается `RATE_LIMIT` и меняется на лету через
   ключ `/otus/config/rate_limit` в etcd.
 - **Распределенный мьютекс** на etcd (`ETCD_ENDPOINTS`): миграция схемы БД
   выполняется под блокировкой `/otus/lock/migrate`, чтобы реплики
   приложения не гонялись друг с другом.
 - **Аудит-лог** в MongoDB replica set (`MONGO_URL`): каждое созданное
-  сообщение пишется с write concern majority, последние события — на
+  сообщение пишется с write concern majority, последние события - на
   `GET /audit`.
 - **Кэш** списка сообщений в Tarantool (`TARANTOOL_ADDRS`): TTL 10 секунд,
   заголовок `X-Cache: HIT/MISS`, создание сообщения сбрасывает кэш.
@@ -55,11 +81,12 @@ gRPC-сервер на порту 9091 (контракт — `api/proto/messages
 Брокеры сообщений и распределенные хранилища (тоже включаются переменными
 окружения):
 
-- **Событийная шина.** Каждое созданное сообщение публикуется событием сразу
-  во все настроенные брокеры: Kafka (`KAFKA_BROKERS`, acks=all), RabbitMQ
+- **Событийная шина.** Каждое сообщение сохраняется вместе с заданиями outbox
+  для всех настроенных брокеров: Kafka (`KAFKA_BROKERS`, acks=all), RabbitMQ
   (`RABBITMQ_URLS`, quorum-очередь с подтверждением публикации) и NATS
-  JetStream (`NATS_URLS`, поток на три реплики). Публикация best-effort:
-  недоступный брокер не валит запрос, но виден в метриках.
+  JetStream (`NATS_URLS`, поток на три реплики). Фоновые воркеры доставляют
+  события как минимум один раз; задания остаются в PostgreSQL до подтверждения
+  брокера. Недоступность при старте не исключает брокер из списка получателей.
 - **Воркер** `cmd/consumer` читает события из выбранного брокера (`BROKER`)
   и раскладывает их в Cassandra и Elasticsearch. Масштабируется числом
   реплик контейнера и переменной `CONSUMER_WORKERS`.
@@ -76,12 +103,23 @@ gRPC-сервер на порту 9091 (контракт — `api/proto/messages
   (`GET /files?tag=kind=report`). Параметр `engine` у `/search` позволяет
   выполнить тот же запрос в PostgreSQL или Cassandra и сравнить.
 
+Unary gRPC `CreateMessage` принимает ключ идемпотентности в метаданных
+`idempotency-key`; другой текст с тем же ключом возвращает `AlreadyExists`.
+`BatchCreate` фиксирует каждый элемент отдельно; безопасный повтор всего
+потока без ключей отдельных элементов не гарантируется.
+
 Версия и дата зашиваются в бинарь при компиляции через `-ldflags`
 (пакет `internal/version`).
 
 ## Структура
 
 ```
+internal/domain/messaging/            модель сообщения и доменные ошибки
+internal/application/messages/       общие команды и запросы HTTP / gRPC
+internal/outbox/                      фоновые воркеры с арендой и повторами
+internal/storage/outbox.go            PostgreSQL outbox: SKIP LOCKED, токены аренды
+resilience/                          стенд отказов и наблюдаемости
+scripts/resilience-test.py            проверки стенда (стандартная библиотека Python)
 cmd/app/main.go                       точка входа app: HTTP + gRPC + graceful shutdown
 cmd/gateway/main.go                   второй сервис: HTTP-прокси и gRPC-мост в app
 cmd/chaosproxy/main.go                прокси с метриками трафика и управляемыми помехами
@@ -106,7 +144,7 @@ observability/nginx/                  конфиг реверс-прокси с 
 .github/workflows/loadtest.yml        нагрузочный тест k6 (ручной запуск)
 Dockerfile                            multi-stage сборка образов app и gateway
 docker-compose.yml                    запуск app + postgres
-docs/REPORT.md                        отчёт по сборке/деплою
+docs/REPORT.md                        отчет по сборке/деплою
 docs/TEST-REPORT.md                   протокол тестирования
 docs/OBSERVABILITY.md                 протокол проверки наблюдаемости
 docs/SECURITY.md                      протокол проверки защиты (TLS, JWT, хеширование)
@@ -139,7 +177,7 @@ Go 1.26+, golangci-lint 2.x, Docker с плагином compose, make. Прил�
 
 ## Локально
 
-Все команды — в Makefile, `make help` покажет список:
+Все команды - в Makefile, `make help` покажет список:
 
 ```bash
 make fmt      # форматирование
@@ -148,13 +186,13 @@ make test     # юнит-тесты
 make build    # бинарь в bin/otus-app
 ```
 
-Прогнать всё разом перед коммитом:
+Прогнать все разом перед коммитом:
 
 ```bash
 make fmt lint test build
 ```
 
-Проще всего поднять всё через compose в `observability/` (перед первым запуском
+Проще всего поднять все через compose в `observability/` (перед первым запуском
 сгенерировать сертификаты и отрендерить realm Keycloak):
 
 ```bash
@@ -215,10 +253,10 @@ bash scripts/ha-failover-test.sh
 
 Скрипт держит нагрузку на API, по очереди убивает и возвращает узлы каждой
 СУБД, отдельно проверяет потерю кворума etcd и печатает статистику ошибок.
-Протокол и выводы — в [docs/DATABASES.md](docs/DATABASES.md).
+Протокол и выводы - в [docs/DATABASES.md](docs/DATABASES.md).
 
 **Стенд брокеров сообщений** (Kafka, RabbitMQ и NATS по три узла, приложение
-и три воркера — 15 контейнеров):
+и три воркера - 15 контейнеров):
 
 ```bash
 make brokers-up
@@ -227,7 +265,7 @@ make brokers-down
 ```
 
 **Стенд распределенных хранилищ** (MinIO из четырех узлов, HDFS с тремя
-датанодами, Cassandra и Elasticsearch по три узла — 18 контейнеров):
+датанодами, Cassandra и Elasticsearch по три узла - 18 контейнеров):
 
 ```bash
 make storage-up
@@ -239,10 +277,10 @@ make storage-down
 ```
 
 Стенды поднимаются по очереди: вместе они не помещаются в память. Стенду
-хранилищ нужно около 10 ГиБ, доступных Docker. Протокол и выводы — в
+хранилищ нужно около 10 ГиБ, доступных Docker. Протокол и выводы - в
 [docs/BROKERS-STORAGE.md](docs/BROKERS-STORAGE.md).
 
-**Нагрузочное тестирование** (k6) против развёрнутого сервиса:
+**Нагрузочное тестирование** (k6) против развернутого сервиса:
 
 ```bash
 docker run --rm -e BASE_URL=https://zhemchugovei.duckdns.org \
@@ -250,17 +288,17 @@ docker run --rm -e BASE_URL=https://zhemchugovei.duckdns.org \
   -v "$PWD/loadtest:/loadtest" grafana/k6 run /loadtest/script.js
 ```
 
-Сценарий сам получает JWT в Keycloak (`setup()`) и шлёт `POST /messages` с
+Сценарий сам получает JWT в Keycloak (`setup()`) и шлет `POST /messages` с
 заголовком `Authorization`.
 
-Протокол испытаний и анализ — в [docs/TEST-REPORT.md](docs/TEST-REPORT.md).
+Протокол испытаний и анализ - в [docs/TEST-REPORT.md](docs/TEST-REPORT.md).
 
 ## Наблюдаемость
 
 Оба сервиса инструментированы: структурные JSON-логи (`slog`), метрики
 Prometheus (`/metrics`, включая бизнес-метрику `otus_messages_created_total`) и
-трейсинг OpenTelemetry (запросы к БД — через `otelpgx`). Трейсинг включается
-переменной `OTEL_EXPORTER_OTLP_ENDPOINT` (без неё — выключен, приложение
+трейсинг OpenTelemetry (запросы к БД - через `otelpgx`). Трейсинг включается
+переменной `OTEL_EXPORTER_OTLP_ENDPOINT` (без нее - выключен, приложение
 работает как обычно).
 
 Локальный стек наблюдаемости поднимается отдельно:
@@ -280,7 +318,7 @@ docker compose up -d
   почта;
 - **Трейсы** цепочки gateway→app→БД → Jaeger.
 
-Протокол проверки — в [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
+Протокол проверки - в [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
 ## Безопасность
 
@@ -288,16 +326,16 @@ docker compose up -d
   сертификатом, подписанным внутренним CA (`observability/certs/gen-certs.sh`).
   Клиентские сертификаты есть у gateway, nginx и Prometheus. Включается
   переменными `TLS_CERT_FILE` / `TLS_KEY_FILE` / `TLS_CA_FILE` (без них сервис
-  работает по HTTP — так гоняются юнит- и интеграционные тесты).
+  работает по HTTP - так гоняются юнит- и интеграционные тесты).
 - **TLS снаружи.** nginx терминирует HTTPS с сертификатом Let's Encrypt для
-  `zhemchugovei.duckdns.org`, порт 80 отдаёт только редирект и ACME-челлендж.
+  `zhemchugovei.duckdns.org`, порт 80 отдает только редирект и ACME-челлендж.
 - **JWT через Keycloak.** `POST /messages` требует токен: app скачивает JWKS
   из Keycloak (`AUTH_JWKS_URL`), проверяет подпись RS256, срок действия и
   издателя (`AUTH_ISSUER`). Grafana логинится через тот же Keycloak (OAuth),
-  а Prometheus, Alertmanager и Jaeger закрыты oauth2-proxy — nginx пускает к
+  а Prometheus, Alertmanager и Jaeger закрыты oauth2-proxy - nginx пускает к
   ним только с сессией Keycloak (`auth_request`).
 - **Хеширование данных.** При сохранении сообщения считается SHA-256 текста и
-  кладётся в БД рядом с ним; при чтении хеш пересчитывается — подмена данных в
+  кладется в БД рядом с ним; при чтении хеш пересчитывается - подмена данных в
   обход API видна по `checksum_ok: false`.
 
 Получить токен и создать сообщение:
@@ -311,30 +349,33 @@ curl -X POST https://zhemchugovei.duckdns.org/messages \
   -H "Authorization: Bearer $TOKEN" -d '{"text":"привет"}'
 ```
 
-Протокол проверки — в [docs/SECURITY.md](docs/SECURITY.md).
+Протокол проверки - в [docs/SECURITY.md](docs/SECURITY.md).
 
 ## CI/CD
 
 Основной пайплайн `ci-cd.yml`:
 
-1. **lint** — gofmt и golangci-lint.
-2. **unit tests** — `go test -race -cover` (блокирующий этап перед упаковкой).
-3. **security** — gitleaks (поиск секретов в истории), govulncheck и trivy
+1. **lint** - gofmt и golangci-lint.
+2. **unit tests** - `go test -race -cover` (блокирующий этап перед упаковкой).
+3. **security** - gitleaks (поиск секретов в истории), govulncheck и trivy
    (уязвимости зависимостей), валидация конфигов nginx / Keycloak /
    oauth2-proxy / Alertmanager на тестовых значениях (`scripts/check-configs.sh`).
-4. **build-and-push** — собирает Docker-образ и пушит в Docker Hub
+4. **build-and-push** - собирает Docker-образ и пушит в Docker Hub
    (только после успешных lint, unit-тестов и security).
-5. **deploy** — заходит на сервер по SSH, `docker compose pull` и `up -d`.
-6. **security smoke** — после деплоя негативные проверки на живом сервере
+5. **deploy** - заходит на сервер по SSH, `docker compose pull` и `up -d`.
+6. **security smoke** - после деплоя негативные проверки на живом сервере
    (`scripts/security-smoke.sh`): интерфейсы наблюдаемости без сессии Keycloak
-   закрыты, `POST /messages` без токена — 401, HTTP уводится на HTTPS.
+   закрыты, `POST /messages` без токена - 401, HTTP уводится на HTTPS.
 
 Отдельные треки:
 
-- `integration.yml` — интеграционные тесты с сервисом Postgres. Запускаются на
+- `resilience.yml` - на push в `resilience` / `main`, на PR и вручную:
+  проверка кода, Docker-сборка, PostgreSQL integration, отказы и наблюдаемость.
+  Артефакт `resilience-evidence` содержит результаты, метрики, алерт, трейс и логи.
+- `integration.yml` - интеграционные тесты с сервисом Postgres. Запускаются на
   pull request в `main` (ловят регрессии по БД до merge) и вручную
   (`workflow_dispatch`).
-- `loadtest.yml` — нагрузочный тест k6 по указанному URL, вручную
+- `loadtest.yml` - нагрузочный тест k6 по указанному URL, вручную
   (`workflow_dispatch`).
 
 Секреты репозитория: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `SSH_HOST`,
@@ -350,19 +391,19 @@ Alertmanager и realm Keycloak (секреты подставляются чер
 каталог `observability/` на сервер, генерирует внутренний CA и сертификаты mTLS,
 при первом деплое выпускает сертификат Let's Encrypt, и поднимает стек
 (`docker-compose.server.yml`: nginx, app, gateway, chaos-прокси, Keycloak, БД, Prometheus,
-Grafana, Alertmanager, Jaeger, ELK, certbot). Чтобы всё влезло в 4Gi памяти,
-тяжёлым контейнерам заданы `mem_limit` и ужаты heap-ы (Elasticsearch и
-Keycloak — по 256m).
+Grafana, Alertmanager, Jaeger, ELK, certbot). Чтобы все влезло в 4Gi памяти,
+тяжелым контейнерам заданы `mem_limit` и ужаты heap-ы (Elasticsearch и
+Keycloak - по 256m).
 
-Наружу открыты только 80/443, всё ходит через nginx:
+Наружу открыты только 80/443, все ходит через nginx:
 
-- <https://zhemchugovei.duckdns.org/> — API app (`/hello`, `/messages`, ...)
-- <https://zhemchugovei.duckdns.org/swagger/> — Swagger UI
-- <https://zhemchugovei.duckdns.org/status> — статусная страница
-- <https://zhemchugovei.duckdns.org/gw/messages> — gateway (HTTP+JSON через
-  chaos-прокси), <https://zhemchugovei.duckdns.org/gw/grpc/messages> — gRPC-мост
-- <https://zhemchugovei.duckdns.org/auth/> — Keycloak
-- <https://zhemchugovei.duckdns.org/grafana/> — Grafana (вход через Keycloak)
+- <https://zhemchugovei.duckdns.org/> - API app (`/hello`, `/messages`, ...)
+- <https://zhemchugovei.duckdns.org/swagger/> - Swagger UI
+- <https://zhemchugovei.duckdns.org/status> - статусная страница
+- <https://zhemchugovei.duckdns.org/gw/messages> - gateway (HTTP+JSON через
+  chaos-прокси), <https://zhemchugovei.duckdns.org/gw/grpc/messages> - gRPC-мост
+- <https://zhemchugovei.duckdns.org/auth/> - Keycloak
+- <https://zhemchugovei.duckdns.org/grafana/> - Grafana (вход через Keycloak)
 - <https://zhemchugovei.duckdns.org/prometheus/>, `/alertmanager/`, `/jaeger/`,
-  `/kibana/` — за oauth2-proxy: без сессии Keycloak nginx отправляет на
+  `/kibana/` - за oauth2-proxy: без сессии Keycloak nginx отправляет на
   страницу логина

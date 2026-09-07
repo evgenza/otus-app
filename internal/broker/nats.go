@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -154,18 +155,19 @@ func (n *natsConsumer) Consume(ctx context.Context, handle func(context.Context,
 		ev, decodeErr := decode(msg.Data())
 		if decodeErr != nil {
 			Consumed.WithLabelValues("nats", "malformed").Inc()
-			_ = msg.Term()
-			continue
+			return fmt.Errorf("некорректное событие NATS: %w", decodeErr)
 		}
 		if err := handle(ctx, ev); err != nil {
 			Consumed.WithLabelValues("nats", "error").Inc()
 			slog.WarnContext(ctx, "не удалось обработать событие", "broker", "nats", "id", ev.ID, "err", err)
-			_ = msg.Nak() // вернуть в поток и получить снова
-			continue
+			_ = msg.NakWithDelay(5 * time.Second)
+			return err
 		}
 		Consumed.WithLabelValues("nats", "ok").Inc()
 		Lag.WithLabelValues("nats").Observe(time.Since(ev.CreatedAt).Seconds())
-		_ = msg.Ack()
+		if err := msg.DoubleAck(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }

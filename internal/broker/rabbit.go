@@ -3,7 +3,9 @@ package broker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"strconv"
 	"sync"
 	"time"
@@ -21,17 +23,18 @@ func rabbitSettings() (urls []string, queue string, prefetch int) {
 	return
 }
 
-// rabbitConn — соединение с кластером, которое умеет переподключаться:
+// rabbitConn - соединение с кластером, которое умеет переподключаться:
 type rabbitConn struct {
 	urls  []string
 	queue string
 
-	mu   sync.Mutex
-	conn *amqp.Connection
-	ch   *amqp.Channel
+	mu     sync.Mutex
+	conn   *amqp.Connection
+	ch     *amqp.Channel
+	socket net.Conn
 }
 
-func (r *rabbitConn) channel(confirm bool) (*amqp.Channel, error) {
+func (r *rabbitConn) channel(ctx context.Context, confirm bool) (*amqp.Channel, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.ch != nil && !r.ch.IsClosed() && r.conn != nil && !r.conn.IsClosed() {
@@ -41,33 +44,12 @@ func (r *rabbitConn) channel(confirm bool) (*amqp.Channel, error) {
 
 	var lastErr error
 	for _, url := range r.urls {
-		conn, err := amqp.DialConfig(url, amqp.Config{
-			Heartbeat: 5 * time.Second,
-			Dial:      amqp.DefaultDial(5 * time.Second),
-		})
+		conn, ch, socket, err := openRabbitChannel(ctx, url, r.queue, confirm)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		ch, err := conn.Channel()
-		if err != nil {
-			_ = conn.Close()
-			lastErr = err
-			continue
-		}
-		if _, err := ch.QueueDeclare(r.queue, true, false, false, false, quorumArgs); err != nil {
-			_ = conn.Close()
-			lastErr = err
-			continue
-		}
-		if confirm {
-			if err := ch.Confirm(false); err != nil {
-				_ = conn.Close()
-				lastErr = err
-				continue
-			}
-		}
-		r.conn, r.ch = conn, ch
+		r.conn, r.ch, r.socket = conn, ch, socket
 		return ch, nil
 	}
 	if lastErr == nil {
@@ -76,15 +58,54 @@ func (r *rabbitConn) channel(confirm bool) (*amqp.Channel, error) {
 	return nil, lastErr
 }
 
+// AMQP RPC не прерываются одним лишь Context. Закрытие сокета при отмене
+// ограничивает handshake, объявление очереди и переключение в confirm-режим.
+func openRabbitChannel(ctx context.Context, url, queue string, confirm bool) (*amqp.Connection, *amqp.Channel, net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var socket net.Conn
+	stopAbort := func() bool { return true }
+	conn, err := amqp.DialConfig(url, amqp.Config{
+		Heartbeat: 5 * time.Second,
+		Dial: func(network, addr string) (net.Conn, error) {
+			c, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, addr)
+			if err == nil {
+				socket = c
+				stopAbort = context.AfterFunc(ctx, func() { _ = c.Close() })
+			}
+			return c, err
+		},
+	})
+	defer func() { stopAbort() }()
+	fail := func(err error) (*amqp.Connection, *amqp.Channel, net.Conn, error) {
+		if socket != nil {
+			_ = socket.Close()
+		}
+		return nil, nil, nil, err
+	}
+	if err != nil {
+		return fail(err)
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		return fail(err)
+	}
+	if _, err = ch.QueueDeclare(queue, true, false, false, false, quorumArgs); err != nil {
+		return fail(err)
+	}
+	if confirm {
+		if err = ch.Confirm(false); err != nil {
+			return fail(err)
+		}
+	}
+	return conn, ch, socket, nil
+}
+
 func (r *rabbitConn) closeLocked() {
-	if r.ch != nil {
-		_ = r.ch.Close()
-		r.ch = nil
-	}
 	if r.conn != nil {
-		_ = r.conn.Close()
-		r.conn = nil
+		_ = r.conn.CloseDeadline(time.Now().Add(time.Second))
 	}
+	r.ch, r.conn, r.socket = nil, nil, nil
 }
 
 func (r *rabbitConn) Close() error {
@@ -98,13 +119,13 @@ type rabbitPublisher struct {
 	*rabbitConn
 }
 
-func newRabbitPublisher(_ context.Context) (Publisher, error) {
+func newRabbitPublisher(ctx context.Context) (Publisher, error) {
 	urls, queue, _ := rabbitSettings()
 	if len(urls) == 0 {
 		return nil, nil
 	}
 	p := &rabbitPublisher{&rabbitConn{urls: urls, queue: queue}}
-	if _, err := p.channel(true); err != nil {
+	if _, err := p.channel(ctx, true); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -121,11 +142,16 @@ func (r *rabbitPublisher) Publish(ctx context.Context, ev Event) error {
 	// с узлом, вторая уже пойдет по свежему.
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		ch, err := r.channel(true)
+		ch, err := r.channel(ctx, true)
 		if err != nil {
 			lastErr = err
 			continue
 		}
+		r.mu.Lock()
+		socket := r.socket
+		r.mu.Unlock()
+		// Прерываем и заблокированную запись в сеть, а не только ожидание ACK.
+		stopAbort := context.AfterFunc(ctx, func() { _ = socket.Close() })
 		conf, err := ch.PublishWithDeferredConfirmWithContext(ctx, "", r.queue, false, false,
 			amqp.Publishing{
 				ContentType:  "application/json",
@@ -134,6 +160,7 @@ func (r *rabbitPublisher) Publish(ctx context.Context, ev Event) error {
 				Timestamp:    time.Now(),
 				Body:         payload,
 			})
+		stopAbort()
 		if err != nil {
 			lastErr = err
 			r.mu.Lock()
@@ -170,7 +197,7 @@ func (r *rabbitConsumer) Name() string { return "rabbitmq" }
 
 func (r *rabbitConsumer) Consume(ctx context.Context, handle func(context.Context, Event) error) error {
 	for ctx.Err() == nil {
-		ch, err := r.channel(false)
+		ch, err := r.channel(ctx, false)
 		if err != nil {
 			slog.WarnContext(ctx, "нет соединения с RabbitMQ", "err", err)
 			time.Sleep(2 * time.Second)
@@ -190,21 +217,22 @@ func (r *rabbitConsumer) Consume(ctx context.Context, handle func(context.Contex
 			ev, err := decode(d.Body)
 			if err != nil {
 				Consumed.WithLabelValues("rabbitmq", "malformed").Inc()
-				_ = d.Reject(false)
-				continue
+				return fmt.Errorf("некорректное событие RabbitMQ %s: %w", d.MessageId, err)
 			}
 			if err := handle(ctx, ev); err != nil {
 				Consumed.WithLabelValues("rabbitmq", "error").Inc()
 				slog.WarnContext(ctx, "не удалось обработать событие",
 					"broker", "rabbitmq", "id", ev.ID, "err", err)
-				_ = d.Nack(false, true) // вернуть в очередь
-				continue
+				// Закрытие соединения вернет неподтвержденную доставку в очередь.
+				return err
 			}
 			Consumed.WithLabelValues("rabbitmq", "ok").Inc()
 			Lag.WithLabelValues("rabbitmq").Observe(time.Since(ev.CreatedAt).Seconds())
-			_ = d.Ack(false)
+			if err := d.Ack(false); err != nil {
+				return err
+			}
 		}
-		// Канал закрылся — узел кластера ушел, идем на переподключение.
+		// Канал закрылся - узел кластера ушел, идем на переподключение.
 		if ctx.Err() == nil {
 			slog.WarnContext(ctx, "поток доставки RabbitMQ прерван, переподключаюсь")
 			r.reset()

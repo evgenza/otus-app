@@ -2,62 +2,17 @@ package broker
 
 import (
 	"context"
-	"errors"
-	"sync"
 	"testing"
 	"time"
 )
 
-type fakePublisher struct {
-	name string
-	fail bool
-
-	mu   sync.Mutex
-	sent []Event
-}
-
-func (f *fakePublisher) Name() string { return f.name }
-
-func (f *fakePublisher) Publish(_ context.Context, ev Event) error {
-	if f.fail {
-		return errors.New("брокер недоступен")
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.sent = append(f.sent, ev)
-	return nil
-}
-
-func (f *fakePublisher) Close() error { return nil }
-
-func TestBusPublishesToAllBrokers(t *testing.T) {
-	first := &fakePublisher{name: "kafka"}
-	second := &fakePublisher{name: "nats"}
-	bus := &Bus{publishers: []Publisher{first, second}}
-
-	bus.Publish(context.Background(), Event{ID: 1, Text: "привет"})
-
-	for _, p := range []*fakePublisher{first, second} {
-		if len(p.sent) != 1 || p.sent[0].ID != 1 {
-			t.Fatalf("брокер %s не получил событие: %v", p.name, p.sent)
-		}
-	}
-}
-
-// Отказ одного брокера не должен мешать остальным: публикация best-effort.
-func TestBusSurvivesBrokenPublisher(t *testing.T) {
-	broken := &fakePublisher{name: "rabbitmq", fail: true}
-	alive := &fakePublisher{name: "kafka"}
-	bus := &Bus{publishers: []Publisher{broken, alive}}
-
-	bus.Publish(context.Background(), Event{ID: 2, Text: "событие"})
-
-	if len(alive.sent) != 1 {
-		t.Fatalf("живой брокер должен был получить событие, получил %d", len(alive.sent))
-	}
-	names := bus.Names()
-	if len(names) != 2 || names[0] != "rabbitmq" || names[1] != "kafka" {
-		t.Fatalf("неверный список брокеров: %v", names)
+func TestConfiguredNamesIncludesUnavailableDestinations(t *testing.T) {
+	t.Setenv("KAFKA_BROKERS", "unavailable:9092")
+	t.Setenv("RABBITMQ_URLS", "amqp://unavailable:5672")
+	t.Setenv("NATS_URLS", "nats://unavailable:4222")
+	names := ConfiguredNames()
+	if len(names) != 3 {
+		t.Fatalf("потеряны настроенные брокеры: %v", names)
 	}
 }
 

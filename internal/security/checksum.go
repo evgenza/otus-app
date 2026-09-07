@@ -1,11 +1,5 @@
 package security
 
-import (
-	"crypto/sha256"
-	"encoding/hex"
-)
+import "github.com/evgenza/otus-app/internal/domain/messaging"
 
-func Checksum(text string) string {
-	sum := sha256.Sum256([]byte(text))
-	return hex.EncodeToString(sum[:])
-}
+func Checksum(text string) string { return messaging.Checksum(text) }

@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"time"
@@ -34,7 +35,7 @@ func newKafkaPublisher(ctx context.Context) (Publisher, error) {
 	writer := &kafka.Writer{
 		Addr:  kafka.TCP(brokers...),
 		Topic: topic,
-		// Ключ события — id сообщения, поэтому события одного сообщения
+		// Ключ события - id сообщения, поэтому события одного сообщения
 		// всегда попадают в одну партицию и не переупорядочиваются.
 		Balancer: &kafka.Hash{},
 		// acks=all: продюсер ждет подтверждения от всех синхронных реплик,
@@ -54,6 +55,7 @@ func newKafkaPublisher(ctx context.Context) (Publisher, error) {
 func ensureTopic(ctx context.Context, brokers []string, topic string, partitions, replicas int) error {
 	dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	deadline, _ := dialCtx.Deadline()
 
 	var lastErr error
 	for _, addr := range brokers {
@@ -62,6 +64,9 @@ func ensureTopic(ctx context.Context, brokers []string, topic string, partitions
 			lastErr = err
 			continue
 		}
+		// DialContext ограничивает только подключение. Метаданные тоже
+		// должны иметь дедлайн, иначе молчащий брокер заблокирует воркер.
+		_ = conn.SetDeadline(deadline)
 		controller, err := conn.Controller()
 		_ = conn.Close()
 		if err != nil {
@@ -74,6 +79,7 @@ func ensureTopic(ctx context.Context, brokers []string, topic string, partitions
 			lastErr = err
 			continue
 		}
+		_ = ctrlConn.SetDeadline(deadline)
 		err = ctrlConn.CreateTopics(kafka.TopicConfig{
 			Topic:             topic,
 			NumPartitions:     partitions,
@@ -110,8 +116,14 @@ func (k *kafkaPublisher) Publish(ctx context.Context, ev Event) error {
 
 func (k *kafkaPublisher) Close() error { return k.writer.Close() }
 
+type kafkaReader interface {
+	FetchMessage(context.Context) (kafka.Message, error)
+	CommitMessages(context.Context, ...kafka.Message) error
+	Close() error
+}
+
 type kafkaConsumer struct {
-	reader *kafka.Reader
+	reader kafkaReader
 }
 
 func newKafkaConsumer(ctx context.Context) (Consumer, error) {
@@ -124,7 +136,7 @@ func newKafkaConsumer(ctx context.Context) (Consumer, error) {
 	}
 	// Пауза между коммитами offset-ов. Ноль (по умолчанию) означает
 	// синхронный коммит на каждое сообщение: максимальная точность
-	// "не потерять и не повторить", но круговой поход к брокеру на
+	// "не потерять" (повторы допустимы), но круговой поход к брокеру на
 	// каждое событие. Значение больше нуля включает пакетный коммит.
 	commitInterval, err := time.ParseDuration(env("KAFKA_COMMIT_INTERVAL", "0s"))
 	if err != nil {
@@ -158,21 +170,20 @@ func (k *kafkaConsumer) Consume(ctx context.Context, handle func(context.Context
 		}
 		ev, err := decode(msg.Value)
 		if err != nil {
-			// Битое сообщение не чиним ретраями: коммитим и идем дальше.
 			Consumed.WithLabelValues("kafka", "malformed").Inc()
-			_ = k.reader.CommitMessages(ctx, msg)
-			continue
+			return fmt.Errorf("некорректное событие Kafka, раздел %d, смещение %d: %w", msg.Partition, msg.Offset, err)
 		}
 		if err := handle(ctx, ev); err != nil {
 			Consumed.WithLabelValues("kafka", "error").Inc()
-			slog.WarnContext(ctx, "не удалось обработать событие", "broker", "kafka", "id", ev.ID, "err", err)
-			continue // без коммита: событие вычитается заново
+			// Следующий commit подтвердил бы и неуспешное сообщение этого раздела.
+			// Закрываем reader: супервизор начнет с последнего подтвержденного смещения.
+			return fmt.Errorf("не удалось обработать событие Kafka %d: %w", ev.ID, err)
+		}
+		if err := k.reader.CommitMessages(ctx, msg); err != nil {
+			return fmt.Errorf("не удалось подтвердить смещение Kafka: %w", err)
 		}
 		Consumed.WithLabelValues("kafka", "ok").Inc()
 		Lag.WithLabelValues("kafka").Observe(time.Since(ev.CreatedAt).Seconds())
-		if err := k.reader.CommitMessages(ctx, msg); err != nil && ctx.Err() == nil {
-			slog.WarnContext(ctx, "не удалось закоммитить offset", "err", err)
-		}
 	}
 }
 

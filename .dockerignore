@@ -7,3 +7,5 @@ docs/
 Makefile
 docker-compose.yml
 .golangci.yml
+
+artifacts/

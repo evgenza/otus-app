@@ -14,13 +14,14 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/evgenza/otus-app/internal/application/messages"
+	"github.com/evgenza/otus-app/internal/domain/messaging"
 	"github.com/evgenza/otus-app/internal/grpcapi"
-	"github.com/evgenza/otus-app/internal/handlers"
 	"github.com/evgenza/otus-app/internal/observability"
 	"github.com/evgenza/otus-app/internal/security"
 )
 
-func New(store handlers.MessageStore, auth *security.Auth, creds credentials.TransportCredentials) *grpc.Server {
+func New(store messages.Store, auth *security.Auth, creds credentials.TransportCredentials) *grpc.Server {
 	opts := []grpc.ServerOption{
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.UnaryInterceptor(authUnary(auth)),
@@ -30,7 +31,7 @@ func New(store handlers.MessageStore, auth *security.Auth, creds credentials.Tra
 		opts = append(opts, grpc.Creds(creds))
 	}
 	srv := grpc.NewServer(opts...)
-	grpcapi.RegisterMessageServiceServer(srv, &service{store: store})
+	grpcapi.RegisterMessageServiceServer(srv, &service{store: messages.New(store, store)})
 	return srv
 }
 
@@ -78,14 +79,22 @@ func checkAuth(ctx context.Context, auth *security.Auth, method string) error {
 
 type service struct {
 	grpcapi.UnimplementedMessageServiceServer
-	store handlers.MessageStore
+	store messages.Store
 }
 
 func (s *service) CreateMessage(ctx context.Context, req *grpcapi.CreateMessageRequest) (*grpcapi.Message, error) {
 	if strings.TrimSpace(req.GetText()) == "" {
 		return nil, status.Error(codes.InvalidArgument, "поле text обязательно")
 	}
-	msg, err := s.store.Create(ctx, req.GetText(), "")
+	md, _ := metadata.FromIncomingContext(ctx)
+	key := ""
+	if values := md.Get("idempotency-key"); len(values) > 0 {
+		key = values[0]
+	}
+	msg, err := s.store.Create(ctx, req.GetText(), key)
+	if errors.Is(err, messaging.ErrIdempotencyConflict) {
+		return nil, status.Error(codes.AlreadyExists, err.Error())
+	}
 	if err != nil {
 		return nil, status.Error(codes.Internal, "не удалось сохранить сообщение")
 	}
@@ -150,7 +159,7 @@ func (s *service) Chat(stream grpc.BidiStreamingServer[grpcapi.ChatNote, grpcapi
 	}
 }
 
-func toProto(m handlers.Message) *grpcapi.Message {
+func toProto(m messaging.Message) *grpcapi.Message {
 	return &grpcapi.Message{
 		Id:         m.ID,
 		Text:       m.Text,

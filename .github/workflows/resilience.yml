@@ -1,0 +1,58 @@
+name: Resilience
+
+on:
+  push:
+    branches: [resilience]
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  resilience:
+    name: Сборка, отказы и наблюдаемость
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache: false
+      - name: Проверить форматирование
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: Проверить линтером
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+      - name: Проверить код и собрать все сервисы
+        run: |
+          go vet ./...
+          go test -race -cover ./...
+          go build ./...
+      - name: Собрать Docker-образ и запустить стенд
+        run: |
+          mkdir -p artifacts/resilience
+          docker compose -f resilience/docker-compose.yml build app-1
+          docker compose -f resilience/docker-compose.yml up -d --wait --wait-timeout 180
+          docker compose -f resilience/docker-compose.yml exec -T prometheus promtool check config /etc/prometheus/prometheus.yml
+          docker compose -f resilience/docker-compose.yml exec -T nginx nginx -t
+      - name: Проверить транзакции на PostgreSQL
+        env:
+          DATABASE_URL: postgres://otus:otus@localhost:15432/otus?sslmode=disable
+        run: go test -tags=integration -race -v ./... > artifacts/resilience/integration.log 2>&1
+      - name: Проверить отказы, метрики, алерты и трейсы
+        run: python3 scripts/resilience-test.py
+      - name: Собрать диагностику
+        if: always()
+        run: |
+          mkdir -p artifacts/resilience
+          docker compose -f resilience/docker-compose.yml ps -a > artifacts/resilience/containers.txt
+          docker compose -f resilience/docker-compose.yml logs --no-color > artifacts/resilience/compose.log
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: resilience-evidence
+          path: artifacts/resilience
+          if-no-files-found: error
+      - name: Остановить стенд
+        if: always()
+        run: docker compose -f resilience/docker-compose.yml down -v

@@ -5,10 +5,10 @@ info:
     HTTP-сервис на Go с хранением сообщений в PostgreSQL.
 
     Прямые маршруты (`/messages`, `/hello`, ...) обслуживает app,
-    маршруты `/gw/...` — gateway: обычное проксирование по HTTP+JSON
+    маршруты `/gw/...` - gateway: обычное проксирование по HTTP+JSON
     и мост в gRPC (`/gw/grpc/...`) с разными видами стриминга.
 
-    `POST /messages` и `POST /gw/grpc/...` требуют JWT из Keycloak —
+    `POST /messages` и `POST /gw/grpc/...` требуют JWT из Keycloak -
     нажмите Authorize и вставьте access_token.
   version: "1.0"
 servers:
@@ -47,6 +47,16 @@ components:
           type: string
           example: требуется токен авторизации
 paths:
+  /ready:
+    get:
+      summary: Готовность к запросам записи
+      description: Проверяет PostgreSQL с таймаутом 1 секунда. Отказ брокера поглощает outbox.
+      tags: [app]
+      responses:
+        "200":
+          description: База данных доступна
+        "503":
+          description: База данных недоступна
   /health:
     get:
       summary: Проверка живости сервиса
@@ -128,9 +138,10 @@ paths:
     post:
       summary: Создать сообщение (закрытый раздел)
       description: |
-        Доступ контролирует middleware — нужен JWT из Keycloak.
-        Повтор запроса с тем же Idempotency-Key не создаёт дубликат,
-        а возвращает уже сохранённое сообщение.
+        Доступ контролирует middleware - нужен JWT из Keycloak.
+        Повтор запроса с тем же Idempotency-Key не создает дубликат,
+        а возвращает уже сохраненное сообщение. Другой текст с тем же ключом дает 409.
+        Сообщение и задания outbox фиксируются одной транзакцией. Поиск обновляется асинхронно.
       tags: [app]
       security:
         - bearerAuth: []
@@ -154,6 +165,8 @@ paths:
                   type: string
                   example: сообщение через swagger
       responses:
+        "409":
+          description: Ключ идемпотентности уже использован для другого текста
         "201":
           description: Сообщение сохранено
           content:
@@ -324,7 +337,7 @@ paths:
     post:
       summary: Загрузить файл (закрытый раздел)
       description: |
-        Тело запроса — содержимое файла потоком. При неизвестном размере
+        Тело запроса - содержимое файла потоком. При неизвестном размере
         клиент S3 сам разбивает поток на части и грузит multipart.
         backend=hdfs кладет файл в HDFS с репликацией.
       tags: [storage]
@@ -554,7 +567,7 @@ paths:
   /gw/grpc/messages:
     get:
       summary: Список сообщений через gRPC server streaming
-      description: Gateway читает поток сообщений из app по gRPC и отдаёт их построчно (NDJSON)
+      description: Gateway читает поток сообщений из app по gRPC и отдает их построчно (NDJSON)
       tags: [gateway-grpc]
       responses:
         "200":

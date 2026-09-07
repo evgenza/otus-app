@@ -118,3 +118,14 @@ docker-down: ## Остановить compose-стек
 .PHONY: clean
 clean: ## Удалить артефакты сборки
 	rm -rf bin
+
+.PHONY: resilience-up resilience-test resilience-down
+resilience-up: ## Собрать и поднять стенд отказоустойчивости
+	docker compose -f resilience/docker-compose.yml build app-1
+	docker compose -f resilience/docker-compose.yml up -d --wait --wait-timeout 180
+
+resilience-test: ## Проверить отказы, восстановление и наблюдаемость
+	python3 scripts/resilience-test.py
+
+resilience-down: ## Остановить стенд с сохранением данных
+	docker compose -f resilience/docker-compose.yml down

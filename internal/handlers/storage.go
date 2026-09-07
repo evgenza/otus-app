@@ -129,7 +129,7 @@ func (a *API) searchMessages(w http.ResponseWriter, r *http.Request) {
 			"events":     found,
 		})
 	case "postgres":
-		searcher, ok := a.store.(MessageSearcher)
+		searcher, ok := a.rawStore.(MessageSearcher)
 		if !ok {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "поиск по БД не поддерживается"})
 			return

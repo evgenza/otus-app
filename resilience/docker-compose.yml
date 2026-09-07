@@ -1,0 +1,132 @@
+name: otus-resilience
+
+x-app: &app
+  image: otus-app:resilience
+  build:
+    context: ..
+  restart: unless-stopped
+  environment: &app-env
+    DATABASE_URL: postgres://otus:otus@postgres:5432/otus?sslmode=disable
+    NATS_URLS: nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222
+    NATS_REPLICAS: "3"
+    ELASTIC_URLS: http://elasticsearch:9200
+    ELASTIC_INDEX: otus-resilience
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+    OTEL_EXPORTER_OTLP_INSECURE: "true"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    elasticsearch:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://localhost:8080/ready"]
+    interval: 3s
+    timeout: 2s
+    retries: 20
+  stop_grace_period: 45s
+
+x-consumer: &consumer
+  image: otus-app:resilience
+  entrypoint: ["/app/consumer"]
+  restart: unless-stopped
+  environment:
+    <<: *app-env
+    BROKER: nats
+  depends_on:
+    app-1:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://localhost:8091/health"]
+    interval: 3s
+    timeout: 2s
+    retries: 20
+
+x-nats: &nats
+  image: nats:2.10-alpine
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+    interval: 3s
+    timeout: 2s
+    retries: 20
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: otus
+      POSTGRES_PASSWORD: otus
+      POSTGRES_DB: otus
+    ports: ["127.0.0.1:15432:5432"]
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U otus -d otus"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  nats-1:
+    <<: *nats
+    command: ["-name", "nats-1", "-cluster_name", "otus", "-cluster", "nats://0.0.0.0:6222", "-routes", "nats://nats-2:6222,nats://nats-3:6222", "-js", "-sd", "/data", "-m", "8222"]
+    volumes: ["nats-1:/data"]
+  nats-2:
+    <<: *nats
+    command: ["-name", "nats-2", "-cluster_name", "otus", "-cluster", "nats://0.0.0.0:6222", "-routes", "nats://nats-1:6222,nats://nats-3:6222", "-js", "-sd", "/data", "-m", "8222"]
+    volumes: ["nats-2:/data"]
+  nats-3:
+    <<: *nats
+    command: ["-name", "nats-3", "-cluster_name", "otus", "-cluster", "nats://0.0.0.0:6222", "-routes", "nats://nats-1:6222,nats://nats-2:6222", "-js", "-sd", "/data", "-m", "8222"]
+    volumes: ["nats-3:/data"]
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports: ["127.0.0.1:19200:9200"]
+    volumes: ["elastic:/usr/share/elasticsearch/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
+  app-1:
+    <<: *app
+  app-2:
+    <<: *app
+  consumer-1:
+    <<: *consumer
+  consumer-2:
+    <<: *consumer
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports: ["127.0.0.1:18080:8080"]
+    volumes: ["./nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    depends_on:
+      app-1:
+        condition: service_healthy
+      app-2:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports: ["127.0.0.1:19090:9090"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports: ["127.0.0.1:16687:16686"]
+
+volumes:
+  postgres:
+  nats-1:
+  nats-2:
+  nats-3:
+  elastic:

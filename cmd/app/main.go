@@ -22,6 +22,7 @@ import (
 	"github.com/evgenza/otus-app/internal/hdfsstore"
 	"github.com/evgenza/otus-app/internal/httpserver"
 	"github.com/evgenza/otus-app/internal/observability"
+	"github.com/evgenza/otus-app/internal/outbox"
 	"github.com/evgenza/otus-app/internal/ratelimit"
 	"github.com/evgenza/otus-app/internal/search"
 	"github.com/evgenza/otus-app/internal/security"
@@ -65,7 +66,7 @@ func run() error {
 	var store *storage.Postgres
 	err = coordinator.WithLock(ctx, "/otus/lock/migrate", func() error {
 		var lockErr error
-		store, lockErr = storage.New(ctx, dsn)
+		store, lockErr = storage.New(ctx, dsn, broker.ConfiguredNames()...)
 		return lockErr
 	})
 	if err != nil {
@@ -85,7 +86,7 @@ func run() error {
 		slog.Warn("кэш недоступен, работаю без него", "err", err)
 	}
 
-	apiOpts := []handlers.Option{handlers.WithLimiter(limiter)}
+	apiOpts := []handlers.Option{handlers.WithLimiter(limiter), handlers.WithReadiness(store.Ping)}
 	if auditLog != nil {
 		apiOpts = append(apiOpts, handlers.WithAudit(auditLog))
 	}
@@ -94,11 +95,10 @@ func run() error {
 	}
 
 	// Брокеры и распределенные хранилища: каждое включается своими настройками.
-	bus := broker.NewBus(ctx)
-	defer bus.Close()
-	if len(bus.Names()) > 0 {
-		apiOpts = append(apiOpts, handlers.WithBus(bus))
-	}
+	stopOutbox := outbox.Start(ctx, store, broker.ConfiguredNames(), func(ctx context.Context, name string) (outbox.Publisher, error) {
+		return broker.NewPublisher(ctx, name)
+	})
+	defer stopOutbox()
 
 	blobs, err := blobstore.New(ctx)
 	if err != nil {
@@ -168,6 +168,6 @@ func run() error {
 
 	slog.Info("сервис запущен",
 		"version", version.Version, "port", port, "grpc_port", grpcPort, "mtls", tlsCfg != nil,
-		"brokers", bus.Names())
+		"brokers", broker.ConfiguredNames())
 	return httpserver.Run(srv)
 }
