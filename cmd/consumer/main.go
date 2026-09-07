@@ -20,6 +20,7 @@ import (
 	"github.com/evgenza/otus-app/internal/broker"
 	"github.com/evgenza/otus-app/internal/cstore"
 	"github.com/evgenza/otus-app/internal/observability"
+	"github.com/evgenza/otus-app/internal/resilience"
 	"github.com/evgenza/otus-app/internal/search"
 	"github.com/evgenza/otus-app/internal/version"
 )
@@ -44,6 +45,11 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	shutdownTracing, err := observability.SetupTracing(ctx, "otus-consumer")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = shutdownTracing(context.Background()) }()
 
 	events, err := cstore.New(ctx)
 	if err != nil {
@@ -73,7 +79,9 @@ func run() error {
 	}()
 
 	handle := func(ctx context.Context, ev broker.Event) error {
-		// Обработка идемпотентна: в Cassandra ключ — id события, в
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		// Обработка идемпотентна: в Cassandra ключ - id события, в
 		// Elasticsearch документ пишется под тем же id. Повторная
 		// доставка после отказа узла не плодит дубликаты.
 		if events != nil {
@@ -97,18 +105,9 @@ func run() error {
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		consumer, err := broker.NewConsumer(ctx, brokerName)
-		if err != nil {
-			return err
-		}
-		wg.Add(1)
-		go func(n int, c broker.Consumer) {
-			defer wg.Done()
-			defer func() { _ = c.Close() }()
-			if err := c.Consume(ctx, handle); err != nil && ctx.Err() == nil {
-				slog.Error("воркер остановился с ошибкой", "worker", n, "err", err)
-			}
-		}(i, consumer)
+		wg.Go(func() {
+			supervise(ctx, i, brokerName, broker.NewConsumer, handle)
+		})
 	}
 
 	<-ctx.Done()
@@ -132,5 +131,38 @@ func metricsServer() *http.Server {
 		Addr:              ":" + port,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+	}
+}
+
+// Супервизор восстанавливает читателя после ошибки. Процесс не остается
+// «здоровым» с завершившимися горутинами, а повторы ограничены backoff с jitter.
+func supervise(ctx context.Context, worker int, name string,
+	factory func(context.Context, string) (broker.Consumer, error),
+	handle func(context.Context, broker.Event) error) {
+	attempt := 0
+	for ctx.Err() == nil {
+		attemptCtx, cancel := context.WithCancel(ctx)
+		c, err := factory(attemptCtx, name)
+		if err == nil {
+			err = c.Consume(attemptCtx, func(ctx context.Context, ev broker.Event) error {
+				err := handle(ctx, ev)
+				if err == nil {
+					attempt = 0
+				}
+				return err
+			})
+			cancel()
+			_ = c.Close()
+		} else {
+			cancel()
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		attempt++
+		slog.WarnContext(ctx, "перезапускаю читателя после остановки", "worker", worker, "broker", name, "attempt", attempt, "err", err)
+		if !resilience.Wait(ctx, resilience.Backoff(attempt)) {
+			return
+		}
 	}
 }

@@ -46,6 +46,9 @@ func withAuth(r *http.Request) context.Context {
 	if token := r.Header.Get("Authorization"); token != "" {
 		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", token)
 	}
+	if key := r.Header.Get("Idempotency-Key"); key != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "idempotency-key", key)
+	}
 	return ctx
 }
 
@@ -55,6 +58,8 @@ func writeGRPCError(w http.ResponseWriter, err error) {
 	switch st.Code() {
 	case codes.Unauthenticated:
 		httpStatus = http.StatusUnauthorized
+	case codes.AlreadyExists:
+		httpStatus = http.StatusConflict
 	case codes.InvalidArgument:
 		httpStatus = http.StatusBadRequest
 	case codes.Internal:

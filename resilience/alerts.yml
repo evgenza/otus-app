@@ -1,0 +1,24 @@
+groups:
+  - name: resilience
+    rules:
+      - alert: OutboxDeliveryDelayed
+        expr: max by (target) (otus_outbox_oldest_pending_seconds) > 15
+        for: 6s
+        labels:
+          severity: warning
+        annotations:
+          summary: "События ожидают доставки в {{ $labels.target }}"
+          description: "Проверьте доступность брокера и повторы outbox."
+      - alert: ProjectionConsumerDown
+        expr: sum(up{job="consumer"}) < 2
+        for: 6s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Одна из реплик потребителя недоступна"
+      - alert: ProjectionErrors
+        expr: sum by (broker) (increase(otus_broker_consumed_total{result=~"error|malformed"}[2m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Не удалось обновить проекцию из {{ $labels.broker }}"

@@ -3,33 +3,26 @@ package broker
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/evgenza/otus-app/internal/domain/messaging"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// Event — событие о созданном сообщении, общий формат для всех брокеров.
-type Event struct {
-	ID        int64     `json:"id"`
-	Text      string    `json:"text"`
-	Checksum  string    `json:"checksum"`
-	CreatedAt time.Time `json:"created_at"`
-	Producer  string    `json:"producer,omitempty"`
-}
+// Event - событие о созданном сообщении, общий формат для всех брокеров.
+type Event = messaging.MessageCreated
 
-// Publisher — отправка события в конкретный брокер.
+// Publisher - отправка события в конкретный брокер.
 type Publisher interface {
 	Name() string
 	Publish(ctx context.Context, ev Event) error
 	Close() error
 }
 
-// Consumer — чтение событий из конкретного брокера.
+// Consumer - чтение событий из конкретного брокера.
 // Consume блокируется до отмены контекста и вызывает handle на каждое
 // событие; ошибка handle означает, что сообщение не подтверждается.
 type Consumer interface {
@@ -50,13 +43,13 @@ var (
 		Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 	}, []string{"broker"})
 
-	// Consumed — счетчик обработанных событий на стороне воркера.
+	// Consumed - счетчик обработанных событий на стороне воркера.
 	Consumed = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "otus_broker_consumed_total",
 		Help: "Количество событий, вычитанных из брокера",
 	}, []string{"broker", "result"})
 
-	// Lag — время от создания события до его обработки воркером.
+	// Lag - время от создания события до его обработки воркером.
 	Lag = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "otus_broker_lag_seconds",
 		Help:    "Задержка доставки события от публикации до обработки",
@@ -64,87 +57,49 @@ var (
 	}, []string{"broker"})
 )
 
-// Bus рассылает событие сразу во все настроенные брокеры.
-type Bus struct {
-	publishers []Publisher
-}
-
-// NewBus поднимает публикаторы для тех брокеров, чьи адреса заданы в
-// окружении. Недоступный брокер не мешает старту: он просто выпадает из
-// шины с предупреждением в логе.
-func NewBus(ctx context.Context) *Bus {
-	bus := &Bus{}
-	for _, factory := range []struct {
-		name string
-		make func(context.Context) (Publisher, error)
-	}{
-		{"kafka", newKafkaPublisher},
-		{"rabbitmq", newRabbitPublisher},
-		{"nats", newNATSPublisher},
-	} {
-		p, err := factory.make(ctx)
-		if err != nil {
-			slog.Warn("брокер недоступен, работаю без него", "broker", factory.name, "err", err)
-			continue
+// ConfiguredNames не зависит от соединения: недоступный при запуске брокер
+// все равно должен получать задания в outbox.
+func ConfiguredNames() []string {
+	var names []string
+	for _, entry := range []struct{ name, key string }{{"kafka", "KAFKA_BROKERS"}, {"rabbitmq", "RABBITMQ_URLS"}, {"nats", "NATS_URLS"}} {
+		if len(envList(entry.key)) > 0 {
+			names = append(names, entry.name)
 		}
-		if p == nil {
-			continue
-		}
-		slog.Info("брокер подключен", "broker", p.Name())
-		bus.publishers = append(bus.publishers, p)
-	}
-	return bus
-}
-
-// Names возвращает список подключенных брокеров.
-func (b *Bus) Names() []string {
-	if b == nil {
-		return nil
-	}
-	names := make([]string, 0, len(b.publishers))
-	for _, p := range b.publishers {
-		names = append(names, p.Name())
 	}
 	return names
 }
 
-// Publish рассылает событие во все брокеры параллельно. Публикация
-// best-effort: ошибка одного брокера не отменяет остальных и не валит
-// запрос, но видна в метрике otus_broker_published_total.
-func (b *Bus) Publish(ctx context.Context, ev Event) {
-	if b == nil || len(b.publishers) == 0 {
-		return
+func NewPublisher(ctx context.Context, name string) (Publisher, error) {
+	var p Publisher
+	var err error
+	switch name {
+	case "kafka":
+		p, err = newKafkaPublisher(ctx)
+	case "rabbitmq":
+		p, err = newRabbitPublisher(ctx)
+	case "nats":
+		p, err = newNATSPublisher(ctx)
+	default:
+		return nil, errUnknownBroker(name)
 	}
-	var wg sync.WaitGroup
-	for _, p := range b.publishers {
-		wg.Add(1)
-		go func(p Publisher) {
-			defer wg.Done()
-			start := time.Now()
-			err := p.Publish(ctx, ev)
-			publishDuration.WithLabelValues(p.Name()).Observe(time.Since(start).Seconds())
-			if err != nil {
-				published.WithLabelValues(p.Name(), "error").Inc()
-				slog.WarnContext(ctx, "не удалось опубликовать событие",
-					"broker", p.Name(), "id", ev.ID, "err", err)
-				return
-			}
-			published.WithLabelValues(p.Name(), "ok").Inc()
-		}(p)
+	if err != nil || p == nil {
+		return p, err
 	}
-	wg.Wait()
+	return &measuredPublisher{Publisher: p}, nil
 }
 
-// Close закрывает соединения со всеми брокерами.
-func (b *Bus) Close() {
-	if b == nil {
-		return
+type measuredPublisher struct{ Publisher }
+
+func (p *measuredPublisher) Publish(ctx context.Context, ev Event) error {
+	start := time.Now()
+	err := p.Publisher.Publish(ctx, ev)
+	publishDuration.WithLabelValues(p.Name()).Observe(time.Since(start).Seconds())
+	result := "ok"
+	if err != nil {
+		result = "error"
 	}
-	for _, p := range b.publishers {
-		if err := p.Close(); err != nil {
-			slog.Warn("ошибка при закрытии брокера", "broker", p.Name(), "err", err)
-		}
-	}
+	published.WithLabelValues(p.Name(), result).Inc()
+	return err
 }
 
 // NewConsumer создает читателя для брокера с указанным именем.

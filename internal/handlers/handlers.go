@@ -3,16 +3,17 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/evgenza/otus-app/internal/application/messages"
 	"github.com/evgenza/otus-app/internal/audit"
-	"github.com/evgenza/otus-app/internal/broker"
+	"github.com/evgenza/otus-app/internal/domain/messaging"
 	"github.com/evgenza/otus-app/internal/handlers/apidocs"
 	"github.com/evgenza/otus-app/internal/observability"
 	"github.com/evgenza/otus-app/internal/ratelimit"
@@ -20,18 +21,9 @@ import (
 	"github.com/evgenza/otus-app/internal/version"
 )
 
-type Message struct {
-	ID         int64     `json:"id"`
-	Text       string    `json:"text"`
-	Checksum   string    `json:"checksum"`
-	ChecksumOK bool      `json:"checksum_ok"`
-	CreatedAt  time.Time `json:"created_at"`
-}
-
-type MessageStore interface {
-	Create(ctx context.Context, text, idemKey string) (Message, error)
-	List(ctx context.Context) ([]Message, error)
-}
+// Псевдонимы сохраняют HTTP-контракт; сама модель принадлежит домену.
+type Message = messaging.Message
+type MessageStore = messages.Store
 
 type AuditLog interface {
 	Record(ctx context.Context, event, text string)
@@ -44,19 +36,14 @@ type MessagesCache interface {
 	Delete(ctx context.Context, key string)
 }
 
-// EventBus рассылает события о созданных сообщениях в брокеры.
-type EventBus interface {
-	Publish(ctx context.Context, ev broker.Event)
-	Names() []string
-}
-
 type API struct {
 	store       MessageStore
+	ready       func(context.Context) error
+	rawStore    MessageStore
 	authEnabled bool
 	limiter     *ratelimit.Limiter
 	auditLog    AuditLog
 	cache       MessagesCache
-	bus         EventBus
 	blobs       Blobs
 	files       Files
 	events      Events
@@ -77,13 +64,13 @@ func WithCache(c MessagesCache) Option {
 	return func(a *API) { a.cache = c }
 }
 
-// WithBus подключает шину брокеров.
-func WithBus(b EventBus) Option {
-	return func(a *API) { a.bus = b }
+func WithReadiness(check func(context.Context) error) Option {
+	return func(a *API) { a.ready = check }
 }
 
 func (a *API) publicRoutes(auth *security.Auth) map[string]http.Handler {
 	return map[string]http.Handler{
+		"GET /ready":     http.HandlerFunc(a.readiness),
 		"GET /health":    http.HandlerFunc(health),
 		"GET /version":   http.HandlerFunc(versionInfo),
 		"GET /hello":     a.limiter.Middleware(http.HandlerFunc(hello)),
@@ -104,7 +91,7 @@ func (a *API) publicRoutes(auth *security.Auth) map[string]http.Handler {
 }
 
 func New(store MessageStore, auth *security.Auth, opts ...Option) http.Handler {
-	a := &API{store: store, authEnabled: auth != nil}
+	a := &API{store: messages.New(store, store), rawStore: store, authEnabled: auth != nil}
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -164,28 +151,21 @@ func (a *API) createMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "некорректное тело запроса"})
 		return
 	}
-	if strings.TrimSpace(req.Text) == "" {
+	if messaging.ValidateText(req.Text) != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "поле text обязательно"})
 		return
 	}
 	msg, err := a.store.Create(r.Context(), req.Text, r.Header.Get("Idempotency-Key"))
+	if errors.Is(err, messaging.ErrIdempotencyConflict) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
 	if err != nil {
 		slog.ErrorContext(r.Context(), "не удалось сохранить сообщение", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "не удалось сохранить сообщение"})
 		return
 	}
 	observability.MessagesCreated.Inc()
-	if a.bus != nil {
-		pubCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
-		defer cancel()
-		a.bus.Publish(pubCtx, broker.Event{
-			ID:        msg.ID,
-			Text:      msg.Text,
-			Checksum:  msg.Checksum,
-			CreatedAt: msg.CreatedAt,
-			Producer:  "otus-app",
-		})
-	}
 	if a.auditLog != nil {
 		a.auditLog.Record(r.Context(), "создано сообщение", msg.Text)
 	}
@@ -232,4 +212,17 @@ func (a *API) listAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, entries)
+}
+
+// Готовность зависит от БД записи; отказ брокера компенсируется очередью outbox.
+func (a *API) readiness(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+	defer cancel()
+	if a.ready != nil {
+		if err := a.ready(ctx); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "база данных недоступна"})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "готов"})
 }

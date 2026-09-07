@@ -20,3 +20,6 @@ observability/alertmanager/alertmanager.yml
 
 # Realm Keycloak рендерится из шаблона с секретами
 observability/keycloak/realm-otus.json
+
+# Результаты воспроизводимых проверок (в CI сохраняются артефактом)
+/artifacts/

@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/evgenza/otus-app/internal/blobstore"
-	"github.com/evgenza/otus-app/internal/broker"
 	"github.com/evgenza/otus-app/internal/cstore"
 	"github.com/evgenza/otus-app/internal/hdfsstore"
 	"github.com/evgenza/otus-app/internal/search"
@@ -220,11 +219,6 @@ func (f *fakeSearch) IndexFile(_ context.Context, doc search.FileDoc) error {
 	return nil
 }
 
-type fakeBus struct{ events []broker.Event }
-
-func (f *fakeBus) Publish(_ context.Context, ev broker.Event) { f.events = append(f.events, ev) }
-func (f *fakeBus) Names() []string                            { return []string{"kafka", "rabbitmq", "nats"} }
-
 func request(t *testing.T, handler http.Handler, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -234,22 +228,6 @@ func request(t *testing.T, handler http.Handler, method, path, body string, head
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	return rec
-}
-
-func TestCreateMessagePublishesEvent(t *testing.T) {
-	bus := &fakeBus{}
-	handler := New(&fakeStore{}, nil, WithBus(bus))
-
-	rec := request(t, handler, http.MethodPost, "/messages", `{"text":"событие в брокер"}`, nil)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("ожидался статус 201, получен %d", rec.Code)
-	}
-	if len(bus.events) != 1 {
-		t.Fatalf("ожидалось одно событие в шине, получено %d", len(bus.events))
-	}
-	if bus.events[0].Text != "событие в брокер" {
-		t.Fatalf("в брокер ушел не тот текст: %q", bus.events[0].Text)
-	}
 }
 
 func TestUploadAndDownloadObject(t *testing.T) {

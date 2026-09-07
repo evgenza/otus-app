@@ -22,7 +22,10 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/evgenza/otus-app/internal/grpcapi"
@@ -225,7 +228,7 @@ func TestAPIAccessControlWithDatabase(t *testing.T) {
 }
 
 func TestGRPCWithDatabase(t *testing.T) {
-	store := newStore(t)
+	store, pool, _ := outboxStore(t, "nats")
 	lis := bufconn.Listen(1 << 20)
 	gsrv := grpcserver.New(store, nil, nil)
 	go func() { _ = gsrv.Serve(lis) }()
@@ -244,6 +247,20 @@ func TestGRPCWithDatabase(t *testing.T) {
 	client := grpcapi.NewMessageServiceClient(conn)
 	ctx := context.Background()
 
+	keyedCtx := metadata.NewOutgoingContext(ctx, metadata.Pairs("idempotency-key", "grpc-key"))
+	first, err := client.CreateMessage(keyedCtx, &grpcapi.CreateMessageRequest{Text: "gRPC-команда"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.CreateMessage(keyedCtx, &grpcapi.CreateMessageRequest{Text: "gRPC-команда"})
+	if err != nil || first.GetId() != second.GetId() {
+		t.Fatalf("повтор gRPC создал дубликат: %v", err)
+	}
+	_, err = client.CreateMessage(keyedCtx, &grpcapi.CreateMessageRequest{Text: "другой текст"})
+	if status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("ожидался конфликт gRPC: %v", err)
+	}
+
 	batch, err := client.BatchCreate(ctx)
 	if err != nil {
 		t.Fatalf("BatchCreate вернул ошибку: %v", err)
@@ -259,6 +276,14 @@ func TestGRPCWithDatabase(t *testing.T) {
 	}
 	if summary.GetCreated() != 2 {
 		t.Fatalf("ожидалось 2 созданных сообщения, получено %d", summary.GetCreated())
+	}
+
+	var outboxCount int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM message_outbox").Scan(&outboxCount); err != nil {
+		t.Fatal(err)
+	}
+	if outboxCount != 3 {
+		t.Fatalf("gRPC должен сохранить три задания outbox, получено %d", outboxCount)
 	}
 
 	stream, err := client.ListMessages(ctx, &grpcapi.ListMessagesRequest{})

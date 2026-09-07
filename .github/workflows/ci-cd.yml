@@ -12,6 +12,10 @@ env:
   GO_VERSION: "1.26"
 
 jobs:
+  resilience:
+    name: Проверка отказоустойчивости
+    uses: ./.github/workflows/resilience.yml
+
   # --------------------------------------------------------------------------
   # Этап 1: проверка линтером и форматированием
   # --------------------------------------------------------------------------
@@ -74,7 +78,7 @@ jobs:
           fetch-depth: 0
 
       - name: Secret scanning
-        uses: gitleaks/gitleaks-action@v2.3.9
+        uses: gitleaks/gitleaks-action@v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -107,7 +111,7 @@ jobs:
   build-and-push:
     name: Build & Push image
     runs-on: ubuntu-latest
-    needs: [lint, test, security]
+    needs: [lint, test, security, resilience]
     if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v5
