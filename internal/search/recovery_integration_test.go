@@ -82,3 +82,50 @@ func TestIndexRecoveryAfterAppliedWriteAndLostReply(t *testing.T) {
 		t.Fatalf("итоговое состояние содержит потери или дубли: %+v", documents)
 	}
 }
+
+func TestIndexRetriesAnotherClusterNode(t *testing.T) {
+	var mu sync.Mutex
+	var nodes []string
+	var saved Document
+	handler := func(node string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Elastic-Product", "Elasticsearch")
+			if r.Method == http.MethodHead {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			nodes = append(nodes, node)
+			if node == nodes[0] {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			if err := json.NewDecoder(r.Body).Decode(&saved); err != nil {
+				t.Error(err)
+				w.WriteHeader(400)
+				return
+			}
+			_, _ = w.Write([]byte(`{"result":"created"}`))
+		}
+	}
+	first := httptest.NewServer(handler("первый"))
+	defer first.Close()
+	second := httptest.NewServer(handler("второй"))
+	defer second.Close()
+	t.Setenv("ELASTIC_URLS", first.URL+","+second.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	index, err := New(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := Document{ID: 81, Text: "доступен один узел", Checksum: "hash-81"}
+	if err := index.IndexMessage(ctx, doc); err != nil {
+		t.Fatalf("не удалось переключиться на доступный узел: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(nodes) != 2 || nodes[0] == nodes[1] || saved != doc {
+		t.Fatalf("узлы %v, сохраненный документ %+v", nodes, saved)
+	}
+}

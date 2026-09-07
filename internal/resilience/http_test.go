@@ -24,7 +24,7 @@ func TestHTTPRetriesOnlyReplayableSafeRequests(t *testing.T) {
 	defer srv.Close()
 	for _, method := range []string{http.MethodPut, http.MethodPost} {
 		calls.Store(0)
-		transport := NewHTTPTransport(t.Name() + method)
+		transport := NewHTTPTransport(t.Name()+method, nil)
 		transport.policy.Base, transport.policy.Max = time.Nanosecond, time.Nanosecond
 		req, _ := http.NewRequest(method, srv.URL, bytes.NewBufferString("данные"))
 		resp, err := transport.RoundTrip(req)
@@ -52,7 +52,7 @@ func TestHTTPBreakerRecovery(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	transport := NewHTTPTransport(t.Name())
+	transport := NewHTTPTransport(t.Name(), nil)
 	transport.policy.Base, transport.policy.Max = time.Nanosecond, time.Nanosecond
 	now := time.Now()
 	transport.breaker.now = func() time.Time { return now }

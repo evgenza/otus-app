@@ -17,10 +17,17 @@ type HTTPTransport struct {
 	dependency string
 }
 
-func NewHTTPTransport(dependency string) *HTTPTransport {
+func HTTPBase() *http.Transport {
 	base := http.DefaultTransport.(*http.Transport).Clone()
 	base.DialContext = (&net.Dialer{Timeout: time.Second, KeepAlive: 30 * time.Second}).DialContext
 	base.ResponseHeaderTimeout = 3 * time.Second
+	return base
+}
+
+func NewHTTPTransport(dependency string, base http.RoundTripper) *HTTPTransport {
+	if base == nil {
+		base = HTTPBase()
+	}
 	return &HTTPTransport{base: base, breaker: NewBreaker(dependency), dependency: dependency,
 		policy: Policy{Attempts: 3, Base: 100 * time.Millisecond, Max: 2 * time.Second}}
 }

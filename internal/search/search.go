@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -114,11 +115,13 @@ func New(ctx context.Context) (*Index, error) {
 		Addresses: addrs,
 		// Повторами управляет один слой, чтобы число попыток не перемножалось.
 		DisableRetry: true,
-		Transport:    resilience.NewHTTPTransport("elasticsearch"),
+		Transport:    resilience.HTTPBase(),
 	})
 	if err != nil {
 		return nil, err
 	}
+	// Каждая попытка проходит через пул Elasticsearch и заново выбирает узел.
+	client.Transport = retryTransport{resilience.NewHTTPTransport("elasticsearch", performTransport(client.Transport.Perform))}
 	idx := &Index{
 		client:    client,
 		msgIndex:  envOr("ELASTIC_INDEX", "otus-messages"),
@@ -140,6 +143,14 @@ func New(ctx context.Context) (*Index, error) {
 	slog.Info("Elasticsearch подключен", "urls", addrs, "index", idx.msgIndex)
 	return idx, nil
 }
+
+type performTransport func(*http.Request) (*http.Response, error)
+
+func (p performTransport) RoundTrip(req *http.Request) (*http.Response, error) { return p(req) }
+
+type retryTransport struct{ *resilience.HTTPTransport }
+
+func (t retryTransport) Perform(req *http.Request) (*http.Response, error) { return t.RoundTrip(req) }
 
 func (i *Index) ensure(ctx context.Context, name, mapping string) error {
 	res, err := i.client.Indices.Exists([]string{name}, i.client.Indices.Exists.WithContext(ctx))
