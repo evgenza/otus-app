@@ -21,8 +21,12 @@ make resilience-down
 ```
 
 В стенде две реплики приложения за nginx, два потребителя, три узла NATS
-JetStream, PostgreSQL, Elasticsearch, Prometheus и Jaeger. Сообщения сохраняются
+JetStream, PostgreSQL, Redis, Elasticsearch, Prometheus и Jaeger. Сообщения сохраняются
 вместе с заданиями outbox, доставка в брокеры идет в фоне.
+
+Проверка включает остановку PostgreSQL, Redis и Elasticsearch, восстановление
+сервисов и сверку данных без дублей. Для Redis и Elasticsearch есть circuit
+breaker, для повторов - jitter и метрики `otus_retry_*`, `otus_circuit_breaker_*`.
 
 Адреса доступны только на локальном интерфейсе:
 

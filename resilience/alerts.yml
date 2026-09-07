@@ -1,6 +1,19 @@
 groups:
   - name: resilience
     rules:
+      - alert: DependencyCircuitOpen
+        expr: otus_circuit_breaker_state == 1
+        for: 10s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker открыт для {{ $labels.dependency }}"
+      - alert: RetryBudgetExhausted
+        expr: sum by (dependency, operation) (increase(otus_retry_exhausted_total[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Исчерпаны попытки {{ $labels.operation }} в {{ $labels.dependency }}"
       - alert: OutboxDeliveryDelayed
         expr: max by (target) (otus_outbox_oldest_pending_seconds) > 15
         for: 6s

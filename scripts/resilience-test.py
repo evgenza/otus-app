@@ -2,6 +2,7 @@
 """Проверки на отдельном стенде otus-resilience; результаты сохраняются в JSON."""
 import json
 import os
+import random
 from pathlib import Path
 import subprocess
 import time
@@ -19,7 +20,7 @@ ES = "http://127.0.0.1:19200"
 JAEGER = "http://127.0.0.1:16687"
 RUN = "устойчивость" + uuid.uuid4().hex
 RESULT = {"run": RUN, "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-          "scenarios": [], "samples": [], "latencies_ms": [], "ids": []}
+          "scenarios": [], "samples": [], "latencies_ms": [], "ids": [], "http_retries": []}
 START = time.monotonic()
 
 
@@ -61,6 +62,29 @@ def prom(query):
     return body["data"]["result"]
 
 
+def metric(query):
+    return sum(float(row["value"][1]) for row in prom(query))
+
+
+def assert_final_state():
+    rows = json.loads(sql("SELECT json_agg(json_build_object('id',id,'text',text,'checksum',text_hash)) "
+                          f"FROM messages WHERE text='{RUN}'"))
+    expected = {row["id"]: row for row in rows}
+    assert len(rows) == len(RESULT["ids"]) == len(expected), "Повторы создали лишние сообщения в PostgreSQL"
+    assert set(expected) == set(RESULT["ids"]), "Набор сообщений после восстановления изменился"
+    ids = ",".join(str(x) for x in expected)
+    assert int(sql(f"SELECT count(*) FROM message_outbox WHERE message_id IN ({ids})")) == len(expected), "Потеряны или продублированы задания outbox"
+    assert int(sql(f"SELECT count(*) FROM message_outbox o JOIN messages m ON m.id=o.message_id "
+                   f"WHERE m.id IN ({ids}) AND (o.payload->>'text' IS DISTINCT FROM m.text "
+                   "OR o.payload->>'checksum' IS DISTINCT FROM m.text_hash)")) == 0, "Данные outbox отличаются от сообщений"
+    status, body = request(ES + "/otus-resilience/_mget", {"ids": RESULT["ids"]})
+    assert status == 200 and len(body["docs"]) == len(expected), "Не удалось сверить документы поиска"
+    for doc in body["docs"]:
+        assert doc.get("found"), "После восстановления документ отсутствует в поиске"
+        source = doc["_source"]
+        assert {field: source[field] for field in ("id", "text", "checksum")} == expected[source["id"]], "Поисковая проекция содержит неверные данные"
+
+
 def pending():
     return int(sql("SELECT count(*) FROM message_outbox WHERE delivered_at IS NULL"))
 
@@ -75,7 +99,17 @@ def created(phase, n):
     for _ in range(n):
         key = uuid.uuid4().hex
         begin = time.monotonic()
-        status, message = request(API + "/messages", {"text": RUN}, {"Idempotency-Key": key})
+        for attempt in range(3):
+            try:
+                status, message = request(API + "/messages", {"text": RUN}, {"Idempotency-Key": key})
+            except OSError as error:
+                status, message = 0, str(error)
+            if status not in (0, 502, 503, 504) or attempt == 2:
+                break
+            # При смене DNS ответ может потеряться. Повторяем тот же ключ, без новой операции.
+            RESULT["http_retries"].append({"phase": phase, "status": status, "attempt": attempt + 1})
+            delay = 0.1 * 2 ** attempt
+            time.sleep(random.uniform(delay / 2, delay))
         elapsed = (time.monotonic() - begin) * 1000
         assert status == 201, (status, message)
         RESULT["latencies_ms"].append({"phase": phase, "ms": round(elapsed, 2)})
@@ -120,6 +154,41 @@ def main():
     RESULT["ids"].append(first["id"])
     passed("Повтор команды и конфликт Idempotency-Key")
 
+    pg_retries = metric('otus_retry_attempts_total{dependency="postgres",operation="outbox_claim"}')
+    compose("stop", "postgres")
+    failed_key = uuid.uuid4().hex
+    status, _ = request(API + "/messages", {"text": RUN}, {"Idempotency-Key": failed_key})
+    assert status == 500, "Запись без PostgreSQL должна завершаться ошибкой"
+    assert request(API + "/health")[0] == 200, "Отказ БД остановил приложение"
+    assert request(API + "/ready")[0] == 503, "Readiness не обнаружил отказ БД"
+    wait_for("метрика повторов после отказа PostgreSQL", lambda: metric('otus_retry_attempts_total{dependency="postgres",operation="outbox_claim"}') > pg_retries)
+    compose("start", "postgres")
+    wait_for("PostgreSQL восстановился", lambda: request(API + "/ready")[0] == 200)
+    status, recovered = request(API + "/messages", {"text": RUN}, {"Idempotency-Key": failed_key})
+    assert status == 201, "Команда не выполнилась после восстановления БД"
+    RESULT["ids"].append(recovered["id"])
+    repeated = request(API + "/messages", {"text": RUN}, {"Idempotency-Key": failed_key})[1]
+    assert repeated["id"] == recovered["id"], "Повтор после отказа БД создал дубликат"
+    assert request(API + "/messages", {"text": RUN}, {"Idempotency-Key": key})[1]["id"] == first["id"], "Перезапуск БД потерял ранее сохраненный ключ"
+    passed("Отказ PostgreSQL, восстановление и повтор команды без дубликатов")
+
+    redis_trips = metric('otus_circuit_breaker_trips_total{dependency="redis"}')
+    redis_rejections = metric('otus_circuit_breaker_calls_total{dependency="redis",result="rejected"}')
+    compose("stop", "redis")
+    created("недоступен Redis", 10)
+    assert request(API + "/messages", {"text": RUN}, {"Idempotency-Key": key})[1]["id"] == first["id"], "Отказ Redis нарушил идемпотентность"
+    wait_for("открытие circuit breaker Redis", lambda: metric('otus_circuit_breaker_trips_total{dependency="redis"}') > redis_trips)
+    wait_for("отклонения circuit breaker Redis", lambda: metric('otus_circuit_breaker_calls_total{dependency="redis",result="rejected"}') > redis_rejections)
+    compose("start", "redis")
+
+    def redis_recovered():
+        for _ in range(2):
+            request(API + "/hello")
+        return len(prom('otus_circuit_breaker_state{dependency="redis",job="app"} == 0')) == 2
+
+    wait_for("обе цепи Redis закрылись после пробного запроса", redis_recovered)
+    passed("Отказ Redis: прием команд продолжается, circuit breaker восстанавливается")
+
     compose("stop", "app-1")
     created("отказ реплики приложения", 10)
     compose("start", "app-1")
@@ -154,11 +223,16 @@ def main():
     wait_for("проекция после перезапуска потребителей", lambda: search_count() == len(RESULT["ids"]))
     passed("Брокер сохраняет события при остановке всех потребителей")
 
+    es_trips = metric('otus_circuit_breaker_trips_total{dependency="elasticsearch"}')
+    exhausted = metric('otus_retry_exhausted_total{dependency="elasticsearch"}')
     compose("stop", "elasticsearch")
     created("недоступен поиск", 5)
     wait_for("ошибки проекции видны в метриках", lambda: bool(prom('sum(otus_broker_consumed_total{result="error"}) > 0')))
+    wait_for("исчерпание повторов Elasticsearch", lambda: metric('otus_retry_exhausted_total{dependency="elasticsearch"}') > exhausted)
+    wait_for("открытие circuit breaker Elasticsearch", lambda: metric('otus_circuit_breaker_trips_total{dependency="elasticsearch"}') > es_trips)
     compose("start", "elasticsearch")
     wait_for("поиск восстановился без потерь", lambda: search_count() == len(RESULT["ids"]), 180)
+    wait_for("закрытие circuit breaker Elasticsearch", lambda: not prom('otus_circuit_breaker_state{dependency="elasticsearch"} != 0'))
     passed("Повтор обработки после отказа Elasticsearch")
 
     # Повторно выдаем только задания данного прогона, имитируя потерю фиксации ACK.
@@ -166,14 +240,16 @@ def main():
     sql(f"UPDATE message_outbox SET delivered_at=NULL, lease_token=NULL, available_at=now() WHERE message_id IN ({ids})")
     wait_for("повторная доставка", lambda: sample("повторная доставка") == 0, 180)
     assert search_count() == len(RESULT["ids"]), "Повтор доставки изменил число документов"
+    assert_final_state()
     passed("Повтор доставки сохраняет число документов", expected=len(RESULT["ids"]), actual=search_count())
+    passed("PostgreSQL, outbox и Elasticsearch содержат одинаковые данные без дубликатов")
 
     trace_data = wait_for("трейсы outbox в Jaeger", lambda: next((t for t in traces() if any(s["operationName"] == "outbox.publish" for s in t["spans"])), None))
     (OUT / "trace.json").write_text(json.dumps(trace_data, ensure_ascii=False, indent=2))
     logs = compose("logs", "--no-color", "app-1", "app-2")
     assert '"msg":"событие outbox доставлено"' in logs, "Нет структурных логов доставки"
     (OUT / "delivery.log").write_text("\n".join(line for line in logs.splitlines() if "outbox" in line))
-    (OUT / "metrics.json").write_text(json.dumps(prom('{__name__=~"otus_outbox_.*|otus_broker_consumed_total"}'), ensure_ascii=False, indent=2))
+    (OUT / "metrics.json").write_text(json.dumps(prom('{__name__=~"otus_outbox_.*|otus_broker_consumed_total|otus_retry_.*|otus_circuit_breaker_.*"}'), ensure_ascii=False, indent=2))
     passed("JSON-логи, метрики и трейсы Jaeger")
     RESULT["status"] = "пройден"
     RESULT["duration_seconds"] = round(time.monotonic() - START, 2)

@@ -71,6 +71,7 @@ func run(ctx context.Context, store Store, target string, factory Factory) {
 		}
 	}()
 	attempt := 0
+	claimAttempt := 0
 	nextStats := time.Time{}
 	for ctx.Err() == nil {
 		if time.Now().After(nextStats) {
@@ -86,17 +87,21 @@ func run(ctx context.Context, store Store, target string, factory Factory) {
 			nextStats = time.Now().Add(time.Second)
 		}
 		claimCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		if claimAttempt > 0 {
+			resilience.Retried("postgres", "outbox_claim")
+		}
 		d, err := store.Claim(claimCtx, target, 45*time.Second)
 		cancel()
 		if err != nil {
 			storageErrors.WithLabelValues(target).Inc()
 			slog.ErrorContext(ctx, "не удалось арендовать задание outbox", "target", target, "err", err)
-			attempt++
-			if !resilience.Wait(ctx, resilience.Backoff(attempt)) {
+			claimAttempt++
+			if !resilience.Wait(ctx, resilience.Backoff(claimAttempt)) {
 				return
 			}
 			continue
 		}
+		claimAttempt = 0
 		if d == nil {
 			if !resilience.Wait(ctx, 250*time.Millisecond) {
 				return
@@ -104,6 +109,9 @@ func run(ctx context.Context, store Store, target string, factory Factory) {
 			continue
 		}
 		pubCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if d.Attempts > 1 {
+			resilience.Retried(target, "outbox_publish")
+		}
 		pubCtx, span := otel.Tracer("otus/outbox").Start(pubCtx, "outbox.publish")
 		span.SetAttributes(attribute.String("messaging.destination.name", target), attribute.Int64("message.id", d.MessageID))
 		if publisher == nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/colinmarc/hdfs/v2"
 
 	"github.com/evgenza/otus-app/internal/observability"
+	"github.com/evgenza/otus-app/internal/resilience"
 )
 
 // ErrNotConfigured возвращается, когда HDFS не настроен переменными окружения.
@@ -75,7 +76,7 @@ func (s *Store) full(name string) string {
 
 // Put заливает файл потоком. Существующий файл перезаписывается: HDFS не
 // умеет менять файл на месте, только создать заново.
-func (s *Store) Put(_ context.Context, name string, r io.Reader) (File, error) {
+func (s *Store) Put(ctx context.Context, name string, r io.Reader) (File, error) {
 	if s == nil {
 		return File{}, ErrNotConfigured
 	}
@@ -97,7 +98,7 @@ func (s *Store) Put(_ context.Context, name string, r io.Reader) (File, error) {
 	// файл остается нулевого размера. Namenode может ответить, что блоки
 	// еще реплицируются - тогда закрытие повторяется с нарастающей паузой,
 	// как это делает и штатный java-клиент.
-	if err := closeWithRetry(w); err != nil {
+	if err := closeWithRetry(ctx, w); err != nil {
 		observability.ObserveStorage("hdfs", "put", start, err)
 		return File{}, err
 	}
@@ -105,17 +106,9 @@ func (s *Store) Put(_ context.Context, name string, r io.Reader) (File, error) {
 	return File{Name: path.Base(name), Path: target, Size: written, Modified: time.Now()}, nil
 }
 
-func closeWithRetry(w *hdfs.FileWriter) error {
-	delay := 50 * time.Millisecond
-	var err error
-	for attempt := 0; attempt < 8; attempt++ {
-		if err = w.Close(); err == nil || !hdfs.IsErrReplicating(err) {
-			return err
-		}
-		time.Sleep(delay)
-		delay *= 2
-	}
-	return err
+func closeWithRetry(ctx context.Context, w *hdfs.FileWriter) error {
+	policy := resilience.Policy{Attempts: 8, Base: 50 * time.Millisecond, Max: 4 * time.Second}
+	return policy.Do(ctx, "hdfs", "close", hdfs.IsErrReplicating, w.Close)
 }
 
 // Get открывает файл на чтение; offset/length задают частичное чтение.

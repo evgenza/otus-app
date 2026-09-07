@@ -35,9 +35,10 @@ jobs:
           docker compose -f resilience/docker-compose.yml up -d --wait --wait-timeout 180
           docker compose -f resilience/docker-compose.yml exec -T prometheus promtool check config /etc/prometheus/prometheus.yml
           docker compose -f resilience/docker-compose.yml exec -T nginx nginx -t
-      - name: Проверить транзакции на PostgreSQL
+      - name: Проверить частичные отказы и состояние данных
         env:
           DATABASE_URL: postgres://otus:otus@localhost:15432/otus?sslmode=disable
+          REDIS_ADDR: localhost:16379
         run: go test -tags=integration -race -v ./... > artifacts/resilience/integration.log 2>&1
       - name: Проверить отказы, метрики, алерты и трейсы
         run: python3 scripts/resilience-test.py

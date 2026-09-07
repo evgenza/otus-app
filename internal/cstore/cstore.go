@@ -15,6 +15,7 @@ import (
 
 	"github.com/evgenza/otus-app/internal/broker"
 	"github.com/evgenza/otus-app/internal/observability"
+	"github.com/evgenza/otus-app/internal/resilience"
 )
 
 // ErrNotConfigured возвращается, когда Cassandra не настроена окружением.
@@ -84,10 +85,29 @@ func newCluster(hosts []string, keyspace string) *gocql.ClusterConfig {
 	// Токен-ориентированная политика шлет запрос сразу на узел-владелец
 	// партиции, а список живых узлов драйвер обновляет сам.
 	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
-	cluster.RetryPolicy = &gocql.ExponentialBackoffRetryPolicy{NumRetries: 3, Min: 50 * time.Millisecond, Max: time.Second}
+	cluster.RetryPolicy = retryPolicy{}
 	cluster.ReconnectInterval = time.Second
 	return cluster
 }
+
+type retryPolicy struct{}
+
+func (retryPolicy) Attempt(q gocql.RetryableQuery) bool {
+	if q.Context().Err() != nil {
+		return false
+	}
+	if q.Attempts() > 3 {
+		resilience.Exhausted("cassandra", "query")
+		return false
+	}
+	if !resilience.Wait(q.Context(), resilience.Jitter(q.Attempts(), 50*time.Millisecond, time.Second)) {
+		return false
+	}
+	resilience.Retried("cassandra", "query")
+	return true
+}
+
+func (retryPolicy) GetRetryType(error) gocql.RetryType { return gocql.RetryNextHost }
 
 func consistency() gocql.Consistency {
 	if raw := strings.TrimSpace(os.Getenv("CASSANDRA_CONSISTENCY")); raw != "" {

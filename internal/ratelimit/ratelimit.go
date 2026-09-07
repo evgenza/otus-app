@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/evgenza/otus-app/internal/resilience"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -23,6 +24,7 @@ type Limiter struct {
 	counter Counter
 	limit   atomic.Int64
 	window  time.Duration
+	breaker *resilience.Breaker
 }
 
 type valkeyCounter struct {
@@ -47,6 +49,12 @@ func New() *Limiter {
 	client := redis.NewUniversalClient(&redis.UniversalOptions{
 		Addrs:      strings.Split(addrs, ","),
 		MasterName: os.Getenv("VALKEY_MASTER_NAME"),
+		// INCR мог выполниться до обрыва ответа. Его автоматический повтор даст двойной учет.
+		MaxRetries:            -1,
+		DialTimeout:           200 * time.Millisecond,
+		ReadTimeout:           200 * time.Millisecond,
+		WriteTimeout:          200 * time.Millisecond,
+		ContextTimeoutEnabled: true,
 	})
 	limit := int64(100)
 	if raw := os.Getenv("RATE_LIMIT"); raw != "" {
@@ -58,7 +66,7 @@ func New() *Limiter {
 }
 
 func NewWithCounter(counter Counter, limit int64, window time.Duration) *Limiter {
-	l := &Limiter{counter: counter, window: window}
+	l := &Limiter{counter: counter, window: window, breaker: resilience.NewBreaker("redis")}
 	l.limit.Store(limit)
 	return l
 }
@@ -89,7 +97,12 @@ func (l *Limiter) Middleware(next http.Handler) http.Handler {
 		ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
 		defer cancel()
 
-		count, err := l.counter.Hit(ctx, key, l.window)
+		var count int64
+		err := l.breaker.Do(ctx, func() error {
+			var err error
+			count, err = l.counter.Hit(ctx, key, l.window)
+			return err
+		})
 		if err != nil {
 			slog.WarnContext(r.Context(), "рейт-лимитер недоступен, запрос пропущен", "err", err)
 			next.ServeHTTP(w, r)

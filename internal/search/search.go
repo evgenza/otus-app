@@ -19,6 +19,7 @@ import (
 	"github.com/elastic/go-elasticsearch/v8"
 
 	"github.com/evgenza/otus-app/internal/observability"
+	"github.com/evgenza/otus-app/internal/resilience"
 )
 
 // ErrNotConfigured возвращается, когда Elasticsearch не настроен окружением.
@@ -110,9 +111,10 @@ func New(ctx context.Context) (*Index, error) {
 		return nil, nil
 	}
 	client, err := elasticsearch.NewClient(elasticsearch.Config{
-		Addresses:     addrs,
-		RetryOnStatus: []int{502, 503, 504, 429},
-		MaxRetries:    3,
+		Addresses: addrs,
+		// Повторами управляет один слой, чтобы число попыток не перемножалось.
+		DisableRetry: true,
+		Transport:    resilience.NewHTTPTransport("elasticsearch"),
 	})
 	if err != nil {
 		return nil, err

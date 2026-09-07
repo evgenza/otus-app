@@ -11,9 +11,13 @@ x-app: &app
     NATS_REPLICAS: "3"
     ELASTIC_URLS: http://elasticsearch:9200
     ELASTIC_INDEX: otus-resilience
+    VALKEY_ADDRS: redis:6379
+    RATE_LIMIT: "10000"
     OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
     OTEL_EXPORTER_OTLP_INSECURE: "true"
   depends_on:
+    redis:
+      condition: service_healthy
     postgres:
       condition: service_healthy
     elasticsearch:
@@ -51,6 +55,17 @@ x-nats: &nats
     retries: 20
 
 services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["127.0.0.1:16379:6379"]
+    volumes: ["redis:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -125,6 +140,7 @@ services:
     ports: ["127.0.0.1:16687:16686"]
 
 volumes:
+  redis:
   postgres:
   nats-1:
   nats-2:

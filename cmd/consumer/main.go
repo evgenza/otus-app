@@ -142,6 +142,9 @@ func supervise(ctx context.Context, worker int, name string,
 	attempt := 0
 	for ctx.Err() == nil {
 		attemptCtx, cancel := context.WithCancel(ctx)
+		if attempt > 0 {
+			resilience.Retried(name, "consumer_start")
+		}
 		c, err := factory(attemptCtx, name)
 		if err == nil {
 			err = c.Consume(attemptCtx, func(ctx context.Context, ev broker.Event) error {
